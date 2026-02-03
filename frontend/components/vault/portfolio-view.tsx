@@ -10,14 +10,21 @@ interface PortfolioViewProps {
     depositDate?: string
 }
 
+import { useVaultBalance } from "@/hooks/use-vault-balance"
+
 export function PortfolioView({
-    principal = 10000,
-    currentYield = 42.35,
+    // principal = 10000, // Removed default
+    // currentYield = 42.35, // Removed default
     apy = 5.12,
     depositDate = "Jan 15, 2026"
 }: PortfolioViewProps) {
-    const totalValue = principal + currentYield
-    const yieldPercentage = (currentYield / principal) * 100
+    const { principal, totalBalance, availableYield, isLoading } = useVaultBalance()
+
+    const principalNum = parseFloat(principal)
+    const yieldNum = parseFloat(availableYield)
+    const totalNum = parseFloat(totalBalance) || (principalNum + yieldNum)
+
+    const yieldPercentage = principalNum > 0 ? (yieldNum / principalNum) * 100 : 0
 
     // Simulated historical yield data
     const yieldHistory = [
@@ -50,10 +57,10 @@ export function PortfolioView({
                         Total Portfolio Value
                     </p>
                     <p className="font-mono text-4xl font-bold">
-                        ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {isLoading ? "Loading..." : `$${totalNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                     </p>
                     <p className="mt-1 text-sm text-green-500">
-                        +${currentYield.toFixed(2)} ({yieldPercentage.toFixed(2)}%)
+                        +${yieldNum.toFixed(2)} ({yieldPercentage.toFixed(2)}%)
                     </p>
                 </div>
 
@@ -66,7 +73,7 @@ export function PortfolioView({
                                 Principal
                             </span>
                         </div>
-                        <p className="font-mono text-xl font-bold">${principal.toLocaleString()}</p>
+                        <p className="font-mono text-xl font-bold">${principalNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                         <p className="text-xs text-muted-foreground mt-1">Protected</p>
                     </div>
 
@@ -77,7 +84,7 @@ export function PortfolioView({
                                 Accrued Yield
                             </span>
                         </div>
-                        <p className="font-mono text-xl font-bold text-green-500">${currentYield.toFixed(2)}</p>
+                        <p className="font-mono text-xl font-bold text-green-500">${yieldNum.toFixed(2)}</p>
                         <p className="text-xs text-muted-foreground mt-1">Available</p>
                     </div>
                 </div>
@@ -96,7 +103,7 @@ export function PortfolioView({
                                 Daily Earnings
                             </p>
                             <p className="font-mono text-lg font-medium text-foreground">
-                                ${((principal * (apy / 100)) / 365).toFixed(2)}
+                                ${((principalNum * (apy / 100)) / 365).toFixed(2)}
                             </p>
                         </div>
                     </div>
