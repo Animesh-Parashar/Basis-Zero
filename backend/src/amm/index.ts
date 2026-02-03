@@ -68,3 +68,9 @@ export {
 
 // Pool Manager
 export { PoolManager, poolManager } from './pool-manager';
+
+// Persistent Pool Manager (Database-backed)
+export { PersistentPoolManager, persistentPoolManager, MarketConfig } from './persistent-pool-manager';
+
+// Database Repository
+export * as ammRepository from '../db/amm-repository';
