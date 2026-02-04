@@ -12,7 +12,10 @@ import {
     placeBetDB,
     quoteBetDB,
     getPositionDB,
-    sellPositionDB
+    sellPositionDB,
+    resolveMarketDB,
+    getMarketsToResolveDB,
+    claimWinningsDB
 } from './db-pool-manager';
 
 export const ammRouter = Router();
@@ -20,7 +23,17 @@ export const ammRouter = Router();
 // Create a new market
 ammRouter.post('/create', async (req, res) => {
     try {
-        const { marketId, title, description, category, expiresAt, initialLiquidity } = req.body;
+        const {
+            marketId,
+            title,
+            description,
+            category,
+            expiresAt,
+            initialLiquidity,
+            resolutionType,
+            oracleConfig,
+            resolverAddress
+        } = req.body;
 
         if (!marketId || !title || !expiresAt || !initialLiquidity) {
             return res.status(400).json({
@@ -34,7 +47,10 @@ ammRouter.post('/create', async (req, res) => {
             description,
             category: category || 'general',
             expiresAt: new Date(expiresAt),
-            initialLiquidity: BigInt(initialLiquidity)
+            initialLiquidity: BigInt(initialLiquidity),
+            resolutionType,
+            oracleConfig,
+            resolverAddress
         });
 
         res.json({ success: true, market });
@@ -143,12 +159,45 @@ ammRouter.post('/sell', async (req, res) => {
             outcomeEnum
         );
 
-        res.json({ success: true, ...result });
+        res.json(result);
     } catch (err) {
         console.error('[AMM Sell] Error:', err);
         res.status(500).json({ error: String(err) });
     }
 });
+
+// Resolve a market
+ammRouter.post('/resolve', async (req, res) => {
+    try {
+        const { marketId, outcome, resolvedBy } = req.body;
+
+        if (!marketId || outcome === undefined) {
+            return res.status(400).json({ error: 'Missing parameters: marketId, outcome' });
+        }
+
+        // Outcome: 0 = YES, 1 = NO
+        const outcomeEnum = Number(outcome) === 0 ? Outcome.YES : Outcome.NO;
+
+        await resolveMarketDB(marketId, outcomeEnum, resolvedBy);
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[AMM Resolve] Error:', err);
+        res.status(500).json({ error: String(err) });
+    }
+});
+
+// Get markets pending resolution
+ammRouter.get('/pending-resolution', async (req, res) => {
+    try {
+        const markets = await getMarketsToResolveDB();
+        res.json({ markets });
+    } catch (err) {
+        console.error('[AMM Pending Resolution] Error:', err);
+        res.status(500).json({ error: String(err), markets: [] });
+    }
+});
+
 
 // Get user position
 ammRouter.get('/position/:marketId/:userId', async (req, res) => {
@@ -160,5 +209,22 @@ ammRouter.get('/position/:marketId/:userId', async (req, res) => {
     } catch (err) {
         console.error('[AMM Position] Error:', err);
         res.status(500).json({ error: String(err), position: null });
+    }
+});
+
+// Claim winnings
+ammRouter.post('/claim', async (req, res) => {
+    try {
+        const { marketId, userId } = req.body;
+
+        if (!marketId || !userId) {
+            return res.status(400).json({ error: 'Missing parameters: marketId, userId' });
+        }
+
+        const result = await claimWinningsDB(marketId, userId);
+        res.json(result);
+    } catch (err) {
+        console.error('[AMM Claim] Error:', err);
+        res.status(500).json({ error: String(err) });
     }
 });

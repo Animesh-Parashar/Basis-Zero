@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils"
 import { useMarkets } from "@/hooks/use-amm"
 import { formatUSDC } from "@/lib/amm-types"
 import type { Market } from "@/lib/amm-types"
+import { useAccount } from "wagmi"
+import { ResolveMarketDialog } from "@/components/trade/resolve-market-dialog"
 
 const categories = [
     { id: "all", label: "All Markets", icon: TrendingUp },
@@ -83,6 +85,20 @@ export function MarketGrid({
 }: MarketGridProps) {
     const { data, isLoading, error } = useMarkets()
     const [useFallback, setUseFallback] = useState(false)
+    const { address } = useAccount()
+    const [resolvingMarket, setResolvingMarket] = useState<Market | null>(null)
+
+    const canResolve = (market: Market) => {
+        if (market.status !== 'ACTIVE') return false
+        if (!address) return false
+
+        // Manual resolution
+        if (market.resolutionType === 'manual' && market.resolverAddress) {
+            return market.resolverAddress.toLowerCase() === address.toLowerCase()
+        }
+
+        return false
+    }
 
     // Use fallback data if API fails
     useEffect(() => {
@@ -208,14 +224,28 @@ export function MarketGrid({
                         </div>
 
                         {/* Footer */}
-                        <div className="flex items-center justify-between text-xs border-t border-border/50 pt-3">
+                        {/* Footer */}
+                        <div className="flex items-center justify-between text-xs border-t border-border/50 pt-3 h-10">
                             <span className="flex items-center gap-1 text-muted-foreground">
                                 <Clock className="h-3 w-3" />
                                 {formatDate(market.expiresAt)}
                             </span>
-                            <span className="font-mono text-foreground font-medium truncate">
-                                {market.volume || formatUSDC(market.totalCollateral)}
-                            </span>
+
+                            {canResolve(market) ? (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        setResolvingMarket(market)
+                                    }}
+                                    className="z-10 px-3 py-1 rounded-md bg-yellow-500/90 text-black font-bold text-[10px] uppercase hover:bg-yellow-400 transition-all shadow-sm hover:shadow-md hover:scale-105"
+                                >
+                                    Resolve
+                                </button>
+                            ) : (
+                                <span className="font-mono text-foreground font-medium truncate">
+                                    {market.volume || formatUSDC(market.totalCollateral)}
+                                </span>
+                            )}
                         </div>
 
                         {/* Bottom accent */}
@@ -230,6 +260,15 @@ export function MarketGrid({
                     <TrendingUp className="h-12 w-12 text-muted-foreground/50 mb-4" />
                     <p className="text-muted-foreground">No markets found in this category.</p>
                 </div>
+            )}
+
+            {/* Resolve Dialog */}
+            {resolvingMarket && (
+                <ResolveMarketDialog
+                    isOpen={!!resolvingMarket}
+                    onClose={() => setResolvingMarket(null)}
+                    market={resolvingMarket}
+                />
             )}
         </div>
     )

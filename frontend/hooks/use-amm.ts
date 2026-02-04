@@ -54,6 +54,22 @@ async function fetchQuote(
     return response.json();
 }
 
+async function claimWinnings(params: {
+    marketId: string;
+    userId: string;
+}): Promise<{ success: boolean; payout: string }> {
+    const response = await fetch('/api/amm/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+    });
+    if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: 'Failed to claim' }));
+        throw new Error(error.error || 'Failed to claim winnings');
+    }
+    return response.json();
+}
+
 async function fetchPosition(
     marketId: string,
     userId: string
@@ -195,25 +211,23 @@ interface CreateMarketParams {
     category?: string;
     expiresAt: string; // ISO date string
     initialLiquidity: string; // USDC amount in base units
+    resolutionType?: 'manual' | 'oracle';
+    oracleConfig?: Record<string, unknown>;
+    resolverAddress?: string;
 }
 
 async function createMarket(params: CreateMarketParams): Promise<{ success: boolean; market: any }> {
     const response = await fetch('/api/amm/markets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            marketId: params.marketId,
-            title: params.title,
-            description: params.description,
-            category: params.category || 'general',
-            expiresAt: params.expiresAt,
-            initialLiquidity: params.initialLiquidity
-        }),
+        body: JSON.stringify(params),
     });
+
     if (!response.ok) {
         const error = await response.json();
         throw new Error(error.error || 'Failed to create market');
     }
+
     return response.json();
 }
 
@@ -228,6 +242,22 @@ export function useCreateMarket() {
         onSuccess: () => {
             // Invalidate markets to refresh the list
             queryClient.invalidateQueries({ queryKey: ammKeys.markets() });
+        },
+    });
+}
+
+/**
+ * Hook to claim winnings
+ */
+export function useClaimWinnings() {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: claimWinnings,
+        onSuccess: () => {
+            // Refresh positions and session balance
+            queryClient.invalidateQueries({ queryKey: ['amm-positions'] });
+            // We might not have a key for session yet, but usually handled by wallet hook or polling
         },
     });
 }

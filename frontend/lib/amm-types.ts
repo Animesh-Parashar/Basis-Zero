@@ -192,6 +192,11 @@ export interface Market {
     trending?: boolean;
     participants?: number;
     volume?: string;
+
+    // Resolution fields
+    resolutionType?: 'manual' | 'oracle' | null;
+    oracleConfig?: Record<string, unknown> | null;
+    resolverAddress?: string | null;
 }
 
 /**

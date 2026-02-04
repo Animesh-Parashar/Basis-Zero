@@ -21,12 +21,28 @@ const categories = [
     { id: "other", label: "Other" },
 ]
 
+// Oracle Assets
+const oracleAssets = [
+    { id: "BTC", label: "Bitcoin (BTC)" },
+    { id: "ETH", label: "Ethereum (ETH)" },
+    { id: "SOL", label: "Solana (SOL)" },
+    { id: "USDC", label: "USDC" },
+]
+
 export function CreateMarketDialog({ isOpen, onClose }: CreateMarketDialogProps) {
     const [title, setTitle] = useState("")
     const [description, setDescription] = useState("")
     const [category, setCategory] = useState("crypto")
     const [expiresAt, setExpiresAt] = useState("")
     const [liquidity, setLiquidity] = useState("10")
+
+    // Resolution state
+    const [resolutionType, setResolutionType] = useState<"manual" | "oracle">("manual")
+    const [oracleAsset, setOracleAsset] = useState("BTC")
+    const [oracleCondition, setOracleCondition] = useState(">")
+    const [oracleTarget, setOracleTarget] = useState("")
+    const [resolverAddress, setResolverAddress] = useState("")
+
     const [success, setSuccess] = useState(false)
 
     const createMarket = useCreateMarket()
@@ -57,7 +73,14 @@ export function CreateMarketDialog({ isOpen, onClose }: CreateMarketDialogProps)
                 description: description || undefined,
                 category,
                 expiresAt: new Date(expiresAt).toISOString(),
-                initialLiquidity: parseUSDCInput(liquidity)
+                initialLiquidity: parseUSDCInput(liquidity),
+                resolutionType,
+                oracleConfig: resolutionType === 'oracle' ? {
+                    asset: oracleAsset,
+                    condition: oracleCondition,
+                    targetPrice: parseFloat(oracleTarget)
+                } : undefined,
+                resolverAddress: resolutionType === 'manual' ? resolverAddress || undefined : undefined
             })
 
             setSuccess(true)
@@ -69,6 +92,9 @@ export function CreateMarketDialog({ isOpen, onClose }: CreateMarketDialogProps)
                 setCategory("crypto")
                 setExpiresAt("")
                 setLiquidity("10")
+                setResolutionType("manual")
+                setOracleTarget("")
+                setResolverAddress("")
             }, 1500)
         } catch (error) {
             console.error('Failed to create market:', error)
@@ -161,9 +187,6 @@ export function CreateMarketDialog({ isOpen, onClose }: CreateMarketDialogProps)
                                     required
                                 />
                             </div>
-                            <p className="text-xs text-muted-foreground mt-1">
-                                When should this market be resolved?
-                            </p>
                         </div>
 
                         {/* Description */}
@@ -178,6 +201,96 @@ export function CreateMarketDialog({ isOpen, onClose }: CreateMarketDialogProps)
                                 rows={2}
                                 className="w-full px-3 py-2 rounded-lg border border-border bg-background focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-colors resize-none"
                             />
+                        </div>
+
+                        {/* Resolution Settings */}
+                        <div className="p-4 rounded-lg bg-muted/30 border border-border space-y-4">
+                            <label className="block text-sm font-medium text-primary">Resolution Method</label>
+
+                            <div className="flex bg-background rounded-lg border border-border p-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setResolutionType('manual')}
+                                    className={cn(
+                                        "flex-1 py-1.5 text-sm font-medium rounded-md transition-all",
+                                        resolutionType === 'manual' ? "bg-primary text-primary-foreground shadow-sm" : "hover:text-primary"
+                                    )}
+                                >
+                                    Manual
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setResolutionType('oracle')}
+                                    className={cn(
+                                        "flex-1 py-1.5 text-sm font-medium rounded-md transition-all",
+                                        resolutionType === 'oracle' ? "bg-primary text-primary-foreground shadow-sm" : "hover:text-primary"
+                                    )}
+                                >
+                                    Price Oracle
+                                </button>
+                            </div>
+
+                            {resolutionType === 'oracle' ? (
+                                <div className="space-y-3 pt-2 animate-in slide-in-from-top-2 fade-in duration-200">
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-xs font-medium mb-1 block text-muted-foreground">Asset</label>
+                                            <select
+                                                value={oracleAsset}
+                                                onChange={(e) => setOracleAsset(e.target.value)}
+                                                className="w-full px-2 py-1.5 rounded-md border border-border bg-background text-sm"
+                                            >
+                                                {oracleAssets.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-medium mb-1 block text-muted-foreground">Title</label>
+                                            <select
+                                                value={oracleCondition}
+                                                onChange={(e) => setOracleCondition(e.target.value)}
+                                                className="w-full px-2 py-1.5 rounded-md border border-border bg-background text-sm"
+                                            >
+                                                <option value=">">Greater (&gt;)</option>
+                                                <option value=">=">Greater/Eq (&ge;)</option>
+                                                <option value="<">Less (&lt;)</option>
+                                                <option value="<=">Less/Eq (&le;)</option>
+                                                <option value="==">Equal (=)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-medium mb-1 block text-muted-foreground">Target Price (USD)</label>
+                                        <div className="relative">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+                                            <input
+                                                type="number"
+                                                value={oracleTarget}
+                                                onChange={(e) => setOracleTarget(e.target.value)}
+                                                placeholder="100000"
+                                                className="w-full pl-6 pr-3 py-1.5 rounded-md border border-border bg-background text-sm outline-none focus:border-primary"
+                                                required={resolutionType === 'oracle'}
+                                            />
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                        Market resolves YES if {oracleAsset} is {oracleCondition} ${oracleTarget} on expiry.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="pt-2 animate-in slide-in-from-top-2 fade-in duration-200">
+                                    <label className="text-xs font-medium mb-1 block text-muted-foreground">Resolver Address (Optional)</label>
+                                    <input
+                                        type="text"
+                                        value={resolverAddress}
+                                        onChange={(e) => setResolverAddress(e.target.value)}
+                                        placeholder="0x... (Leave empty for Admin)"
+                                        className="w-full px-3 py-1.5 rounded-md border border-border bg-background text-sm outline-none focus:border-primary"
+                                    />
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        Address authorized to resolve this market.
+                                    </p>
+                                </div>
+                            )}
                         </div>
 
                         {/* Initial Liquidity */}

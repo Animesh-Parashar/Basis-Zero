@@ -20,6 +20,11 @@ export interface MarketRow {
     k_invariant: string;
     status: 'ACTIVE' | 'RESOLVED' | 'CANCELLED';
     resolution_value: 'YES' | 'NO' | null;
+    resolution_type: 'manual' | 'oracle' | null;
+    oracle_config: Record<string, unknown> | null;
+    resolver_address: string | null;
+    resolved_at: string | null;
+    resolved_by: string | null;
     created_at: string;
 }
 
@@ -54,6 +59,9 @@ export interface CreateMarketInput {
     yesReserves: bigint;
     noReserves: bigint;
     kInvariant: bigint;
+    resolutionType?: 'manual' | 'oracle';
+    oracleConfig?: Record<string, unknown>;
+    resolverAddress?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -74,7 +82,10 @@ export async function createMarket(input: CreateMarketInput): Promise<MarketRow>
             yes_reserves: input.yesReserves.toString(),
             no_reserves: input.noReserves.toString(),
             k_invariant: input.kInvariant.toString(),
-            status: 'ACTIVE'
+            status: 'ACTIVE',
+            resolution_type: input.resolutionType ?? 'manual',
+            oracle_config: input.oracleConfig ?? null,
+            resolver_address: input.resolverAddress ?? null
         })
         .select()
         .single();
@@ -132,7 +143,8 @@ export async function updateMarketReserves(
 
 export async function resolveMarket(
     marketId: string,
-    winner: Outcome
+    winner: Outcome,
+    resolvedBy?: string
 ): Promise<void> {
     const supabase = getSupabase();
 
@@ -140,11 +152,48 @@ export async function resolveMarket(
         .from('markets')
         .update({
             status: 'RESOLVED',
-            resolution_value: winner === Outcome.YES ? 'YES' : 'NO'
+            resolution_value: winner === Outcome.YES ? 'YES' : 'NO',
+            resolved_at: new Date().toISOString(),
+            resolved_by: resolvedBy ?? 'system'
         })
         .eq('market_id', marketId);
 
     if (error) throw new Error(`Failed to resolve market: ${error.message}`);
+}
+
+/**
+ * Get markets that are expired and pending resolution
+ */
+export async function getMarketsToResolve(): Promise<MarketRow[]> {
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from('markets')
+        .select('*')
+        .eq('status', 'ACTIVE')
+        .lt('expires_at', new Date().toISOString())
+        .order('expires_at', { ascending: true });
+
+    if (error) throw new Error(`Failed to get markets to resolve: ${error.message}`);
+    return data ?? [];
+}
+
+/**
+ * Get oracle markets that are expired
+ */
+export async function getOracleMarketsToResolve(): Promise<MarketRow[]> {
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from('markets')
+        .select('*')
+        .eq('status', 'ACTIVE')
+        .eq('resolution_type', 'oracle')
+        .lt('expires_at', new Date().toISOString())
+        .order('expires_at', { ascending: true });
+
+    if (error) throw new Error(`Failed to get oracle markets to resolve: ${error.message}`);
+    return data ?? [];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -187,6 +236,23 @@ export async function getSession(sessionId: string): Promise<SessionRow | null> 
 
     if (error?.code === 'PGRST116') return null;
     if (error) throw new Error(`Failed to get session: ${error.message}`);
+    return data;
+}
+
+export async function getSessionByUser(userAddress: string): Promise<SessionRow | null> {
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+        .from('sessions')
+        .select('*')
+        .eq('user_address', userAddress)
+        .eq('status', 'OPEN')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+    if (error?.code === 'PGRST116') return null;
+    if (error) throw new Error(`Failed to get user session: ${error.message}`);
     return data;
 }
 
