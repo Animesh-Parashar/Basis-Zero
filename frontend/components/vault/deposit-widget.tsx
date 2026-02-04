@@ -67,26 +67,26 @@ export function DepositWidget() {
     const { address, isConnected } = useAccount()
     const chainId = useChainId()
     const { switchChain } = useSwitchChain()
-    
+
     // Multi-chain USDC hook
-    const { 
-        balance, 
-        balanceRaw, 
-        decimals, 
-        chainName, 
-        usdcAddress, 
-        isOnArc, 
-        needsBridge, 
-        isSupported 
+    const {
+        balance,
+        balanceRaw,
+        decimals,
+        chainName,
+        usdcAddress,
+        isOnArc,
+        needsBridge,
+        isSupported
     } = useMultiChainUSDC()
-    
+
     const [amount, setAmount] = useState("")
     const [bridgeStep, setBridgeStep] = useState<BridgeStep>("idle")
     const [bridgeError, setBridgeError] = useState<string | null>(null)
     const [estimatedTime, setEstimatedTime] = useState(0)
-    
+
     // --- Direct Deposit (Arc only) ---
-    
+
     // Allowance check for Arc direct deposit
     const arcUsdcAddress = USDC_CONFIG[ARC_CHAIN_ID]?.address
     const { data: allowanceData, refetch: refetchAllowance } = useReadContract({
@@ -116,54 +116,55 @@ export function DepositWidget() {
     }, [isDepositSuccess])
 
     // --- Bridge Flow (Non-Arc chains) ---
-    
+
+    // CCTP Token Messenger Map
+    const tokenMessengerMap: Record<number, Address> = {
+        80002: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Address, // Polygon Amoy V2
+        11155111: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Address, // Sepolia V2
+    }
+    const tokenMessengerAddress = tokenMessengerMap[chainId]
+
+    // Check CCTP Allowance
+    const { data: cctpAllowance, refetch: refetchCctpAllowance } = useReadContract({
+        address: usdcAddress,
+        abi: ERC20_ABI,
+        functionName: "allowance",
+        args: [address || zeroAddress, tokenMessengerAddress || zeroAddress],
+        chainId,
+        query: { enabled: !!address && !!usdcAddress && !!tokenMessengerAddress && needsBridge }
+    })
+
+    // Refetch allowance after approval
+    useEffect(() => {
+        if (isApproveSuccess) refetchCctpAllowance()
+    }, [isApproveSuccess, refetchCctpAllowance])
+
     const handleBridge = async () => {
         if (!address || !amount || !usdcAddress) return
         setBridgeError(null)
 
         try {
-            // Step 1: Approve USDC on source chain
-            setBridgeStep("approving")
             const amountBig = parseUnits(amount, decimals)
-            
-            // Get source chain CCTP token messenger
-            const tokenMessengerMap: Record<number, Address> = {
-                80002: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA", // Polygon Amoy V2
-                11155111: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA", // Sepolia V2
+
+            if (!tokenMessengerAddress) throw new Error("Chain not supported for bridging")
+
+            // Check if we already have allowance
+            if (cctpAllowance && cctpAllowance >= amountBig) {
+                console.log("Allowance sufficient, skipping approval")
+                handleBurn()
+                return
             }
-            const tokenMessenger = tokenMessengerMap[chainId]
-            if (!tokenMessenger) throw new Error("Chain not supported for bridging")
 
-            // Call backend bridge API
-            setBridgeStep("burning")
-            setEstimatedTime(180) // 3 minutes estimate
+            // Step 1: User approves USDC for TokenMessenger
+            setBridgeStep("approving")
 
-            const response = await fetch("http://localhost:3001/api/cctp/bridge", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    sourceChain: chainId === 80002 ? "polygonAmoy" : "sepolia",
-                    destChain: "arcTestnet",
-                    amount: amountBig.toString(),
-                    recipient: address
-                })
+            // Approve
+            writeApprove({
+                address: usdcAddress,
+                abi: ERC20_ABI,
+                functionName: "approve",
+                args: [tokenMessengerAddress, amountBig]
             })
-
-            if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || "Bridge failed")
-            }
-
-            setBridgeStep("waiting_attestation")
-            
-            // Poll for completion or use SSE
-            const result = await response.json()
-            
-            if (result.success) {
-                setBridgeStep("success")
-            } else {
-                throw new Error(result.error || "Bridge failed")
-            }
 
         } catch (error) {
             console.error("Bridge error:", error)
@@ -172,8 +173,146 @@ export function DepositWidget() {
         }
     }
 
+    // After approval succeeds, burn the USDC
+    useEffect(() => {
+        if (isApproveSuccess && needsBridge && bridgeStep === "approving") {
+            handleBurn()
+        }
+    }, [isApproveSuccess, needsBridge, bridgeStep])
+
+    const handleBurn = async () => {
+        if (!address || !amount || !usdcAddress) return
+
+        try {
+            const amountBig = parseUnits(amount, decimals)
+            setBridgeStep("burning")
+            setEstimatedTime(180) // 3 min
+
+            // 1. Fetch Backend Relayer Address so we mint to it
+            // The backend needs to receive the funds to deposit them into the vault
+            const relayerRes = await fetch("http://localhost:3001/api/cctp/address")
+            const { address: relayerAddress } = await relayerRes.json()
+
+            if (!relayerAddress) throw new Error("Failed to get relayer address")
+
+            const tokenMessengerMap: Record<number, Address> = {
+                80002: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Address,
+                11155111: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Address,
+            }
+            const tokenMessenger = tokenMessengerMap[chainId]
+
+            // Arc testnet domain = 26
+            const ARC_DOMAIN = 26
+
+            // Recipient is Relayer (backend) so it can deposit to vault
+            const recipientBytes32 = ("0x" + relayerAddress.slice(2).padStart(64, "0")) as `0x${string}`
+            const zeroBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`
+
+            // TokenMessengerV2 ABI for depositForBurn
+            const TOKEN_MESSENGER_V2_ABI = [
+                {
+                    name: "depositForBurn",
+                    type: "function",
+                    stateMutability: "nonpayable",
+                    inputs: [
+                        { name: "amount", type: "uint256" },
+                        { name: "destinationDomain", type: "uint32" },
+                        { name: "mintRecipient", type: "bytes32" },
+                        { name: "burnToken", type: "address" },
+                        { name: "destinationCaller", type: "bytes32" },
+                        { name: "maxFee", type: "uint256" },
+                        { name: "minFinalityThreshold", type: "uint32" },
+                    ],
+                    outputs: [{ name: "nonce", type: "uint64" }],
+                },
+            ] as const
+
+            // User calls depositForBurn from their wallet
+            writeDeposit({
+                address: tokenMessenger!,
+                abi: TOKEN_MESSENGER_V2_ABI,
+                functionName: "depositForBurn",
+                args: [
+                    amountBig,
+                    ARC_DOMAIN,
+                    recipientBytes32,
+                    usdcAddress,
+                    zeroBytes32,      // destinationCaller (anyone)
+                    BigInt(500),      // maxFee (0.0005 USDC)
+                    1000              // minFinalityThreshold (fast)
+                ]
+            })
+
+        } catch (error) {
+            console.error("Burn error:", error)
+            setBridgeError(error instanceof Error ? error.message : "Burn failed")
+            setBridgeStep("error")
+        }
+    }
+
+    // After burn succeeds, call backend to finalize (attestation + mint + vault credit)
+    useEffect(() => {
+        if (isDepositSuccess && depositHash && needsBridge && bridgeStep === "burning") {
+            handleFinalize(depositHash)
+        }
+    }, [isDepositSuccess, depositHash, needsBridge, bridgeStep])
+
+    const handleFinalize = async (burnTxHash: `0x${string}`) => {
+        try {
+            setBridgeStep("waiting_attestation")
+
+            const sourceChain = chainId === 80002 ? "polygonAmoy" : "sepolia"
+
+            // Call backend to finalize (fetch attestation, mint, credit user)
+            const response = await fetch("http://localhost:3001/api/cctp/deposit", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    txHash: burnTxHash,
+                    sourceChain,
+                    userAddress: address
+                })
+            })
+
+            if (!response.ok) {
+                const error = await response.json()
+                throw new Error(error.error || "Finalization failed")
+            }
+
+            // Poll for status
+            let attempts = 0
+            while (attempts < 300) { // 15 mins max
+                await new Promise(r => setTimeout(r, 3000)) // 3s interval
+
+                const statusRes = await fetch(`http://localhost:3001/api/cctp/status/${burnTxHash}`)
+                const { status } = await statusRes.json()
+
+                console.log(`Bridge Status: ${status}`)
+
+                if (status === 'minting') {
+                    setBridgeStep("minting")
+                } else if (status === 'depositing') {
+                    setBridgeStep("depositing")
+                } else if (status === 'complete') {
+                    setBridgeStep("success")
+                    return
+                } else if (status === 'error') {
+                    throw new Error("Bridge failed on backend")
+                }
+
+                attempts++
+            }
+            throw new Error("Bridge timeout")
+
+        } catch (error) {
+            console.error("Finalize error:", error)
+            setBridgeError(error instanceof Error ? error.message : "Bridge finalization failed")
+            setBridgeStep("error")
+        }
+    }
+
     // --- Direct Deposit Handler (Arc) ---
-    
+
     const handleDirectDeposit = () => {
         if (!isConnected || !address) return
 
@@ -209,8 +348,8 @@ export function DepositWidget() {
         </div>
     )
 
-    const isProcessing = isApproving || isWaitingApprove || isDepositing || isWaitingDeposit || 
-                         ["approving", "burning", "waiting_attestation", "minting", "depositing"].includes(bridgeStep)
+    const isProcessing = isApproving || isWaitingApprove || isDepositing || isWaitingDeposit ||
+        ["approving", "burning", "waiting_attestation", "minting", "depositing"].includes(bridgeStep)
     const isSuccess = bridgeStep === "success" || isDepositSuccess
 
     if (!isConnected) {
@@ -242,13 +381,13 @@ export function DepositWidget() {
                         {needsBridge ? "Bridge & Deposit Complete!" : "Deposit Successful!"}
                     </h3>
                     <p className="text-muted-foreground mt-2">
-                        {needsBridge 
+                        {needsBridge
                             ? `Bridged ${amount} USDC from ${chainName} to Arc Vault`
                             : `Deposited ${amount} USDC to Vault`
                         }
                     </p>
                 </div>
-                <button 
+                <button
                     onClick={() => { setBridgeStep("idle"); setAmount(""); }}
                     className="w-full py-3 bg-secondary hover:bg-secondary/80 rounded-lg font-medium transition-colors"
                 >
@@ -274,8 +413,8 @@ export function DepositWidget() {
             {/* Chain Badge */}
             <div className={cn(
                 "flex items-center justify-between p-3 rounded-lg border",
-                isOnArc 
-                    ? "border-green-500/20 bg-green-500/10" 
+                isOnArc
+                    ? "border-green-500/20 bg-green-500/10"
                     : "border-yellow-500/20 bg-yellow-500/10"
             )}>
                 <div className="flex items-center gap-2">
@@ -310,7 +449,7 @@ export function DepositWidget() {
                     <label>Amount (USDC)</label>
                     <span>Balance: {parseFloat(balance).toFixed(2)}</span>
                 </div>
-                
+
                 <div className="relative">
                     <input
                         type="number"
@@ -322,7 +461,7 @@ export function DepositWidget() {
                     />
                     <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
                         <span className="font-mono text-sm text-primary font-bold">USDC</span>
-                        <button 
+                        <button
                             onClick={() => setAmount(balance)}
                             className="text-xs bg-primary/10 hover:bg-primary/20 text-primary px-2 py-1 rounded"
                         >
@@ -338,13 +477,13 @@ export function DepositWidget() {
                     <div className="text-xs text-muted-foreground uppercase tracking-wider">Bridge Progress</div>
                     <div className="flex items-center gap-2">
                         {["approving", "burning", "waiting_attestation", "minting", "depositing"].map((step, i) => (
-                            <div 
+                            <div
                                 key={step}
                                 className={cn(
                                     "flex-1 h-1.5 rounded-full transition-colors",
                                     bridgeStep === step ? "bg-primary animate-pulse" :
-                                    ["approving", "burning", "waiting_attestation", "minting", "depositing"].indexOf(bridgeStep) > i 
-                                        ? "bg-green-500" : "bg-secondary"
+                                        ["approving", "burning", "waiting_attestation", "minting", "depositing"].indexOf(bridgeStep) > i
+                                            ? "bg-green-500" : "bg-secondary"
                                 )}
                             />
                         ))}
@@ -382,17 +521,17 @@ export function DepositWidget() {
                     <div className="flex items-center justify-center gap-2">
                         <Loader2 className="h-5 w-5 animate-spin" />
                         <span>
-                            {isApproving || isWaitingApprove ? "Approving..." : 
-                             isDepositing || isWaitingDeposit ? "Depositing..." :
-                             "Bridging..."}
+                            {isApproving || isWaitingApprove ? "Approving..." :
+                                isDepositing || isWaitingDeposit ? "Depositing..." :
+                                    "Bridging..."}
                         </span>
                     </div>
                 ) : (
                     <div className="flex items-center justify-center gap-2">
                         <span>
                             {!isSupported ? "Switch Network" :
-                             needsBridge ? `Bridge & Deposit` :
-                             !hasAllowance ? "Approve USDC" : "Deposit"}
+                                needsBridge ? `Bridge & Deposit` :
+                                    !hasAllowance ? "Approve USDC" : "Deposit"}
                         </span>
                         {isSupported && <ArrowRight className="h-5 w-5" />}
                     </div>

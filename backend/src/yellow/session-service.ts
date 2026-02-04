@@ -265,24 +265,24 @@ export class YellowSessionService {
 
     // Sell a position (Early Exit)
     this.router.post('/sell', async (req, res) => {
-        try {
-            const { sessionId, marketId, amount, outcome } = req.body;
-            // amount here refers to SHARES amount to sell
-            const result = await this.sellPosition(
-                sessionId,
-                marketId,
-                BigInt(amount),
-                outcome === 'YES' ? Outcome.YES : Outcome.NO
-            );
-            res.json({
-                success: true,
-                usdcReceived: result.usdcReceived.toString(),
-                priceImpact: result.priceImpact,
-                availableBalance: result.availableBalance.toString()
-            });
-        } catch (error) {
-            res.status(500).json({ error: String(error) });
-        }
+      try {
+        const { sessionId, marketId, amount, outcome } = req.body;
+        // amount here refers to SHARES amount to sell
+        const result = await this.sellPosition(
+          sessionId,
+          marketId,
+          BigInt(amount),
+          outcome === 'YES' ? Outcome.YES : Outcome.NO
+        );
+        res.json({
+          success: true,
+          usdcReceived: result.usdcReceived.toString(),
+          priceImpact: result.priceImpact,
+          availableBalance: result.availableBalance.toString()
+        });
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
     });
 
     // Get session status
@@ -382,7 +382,7 @@ export class YellowSessionService {
 
         if (response.method === RPCMethod.AuthChallenge) {
           const challenge = parseAuthChallengeResponse(data);
-          
+
           // Create EIP-712 signer for auth
           const eip712Signer = createEIP712AuthMessageSigner(
             this.walletClient!,
@@ -542,8 +542,8 @@ export class YellowSessionService {
     // Recalculate available balance (Principal + Yield - Amount Spent)
     const newBalance = this.getStreamingBalance(sessionId, session.safeModeEnabled);
 
-    console.log(`🟡 AMM Bet Placed: ${marketId} | ${side} | ${Number(amount)/1e6} USDC @ ${result.effectivePrice.toFixed(4)}`);
-    console.log(`   Shares Received: ${Number(result.totalShares)/1e6}`);
+    console.log(`🟡 AMM Bet Placed: ${marketId} | ${side} | ${Number(amount) / 1e6} USDC @ ${result.effectivePrice.toFixed(4)}`);
+    console.log(`   Shares Received: ${Number(result.totalShares) / 1e6}`);
 
     return {
       success: true,
@@ -567,25 +567,25 @@ export class YellowSessionService {
 
     // Execute Sell against AMM
     const result = poolManager.sellPosition(
-        marketId,
-        session.user,
-        sharesAmount,
-        outcome
+      marketId,
+      session.user,
+      sharesAmount,
+      outcome
     );
 
     // Record the "Sell" as a negative bet or trade record
     // For now, we append a special Trade Record to the log
     const trade: Bet = {
-        id: `sell_${Date.now()}`,
-        marketId,
-        side: outcome === Outcome.YES ? 'YES' : 'NO',
-        amount: -result.usdcOut, // Negative amount implies we RECEIVED money
-        shares: -sharesAmount,   // Negative shares implies we SOLD shares
-        timestamp: Date.now(),
-        resolved: false,
-        won: undefined // Not relevant for sell
+      id: `sell_${Date.now()}`,
+      marketId,
+      side: outcome === Outcome.YES ? 'YES' : 'NO',
+      amount: -result.usdcOut, // Negative amount implies we RECEIVED money
+      shares: -sharesAmount,   // Negative shares implies we SOLD shares
+      timestamp: Date.now(),
+      resolved: false,
+      won: undefined // Not relevant for sell
     };
-    
+
     const bets = this.sessionBets.get(sessionId) || [];
     bets.push(trade);
     this.sessionBets.set(sessionId, bets);
@@ -594,14 +594,14 @@ export class YellowSessionService {
 
     const newBalance = this.getStreamingBalance(sessionId, session.safeModeEnabled);
 
-    console.log(`🟡 AMM Sell Executed: ${marketId} | Sold ${Number(sharesAmount)/1e6} Shares`);
-    console.log(`   Received: ${Number(result.usdcOut)/1e6} USDC`);
+    console.log(`🟡 AMM Sell Executed: ${marketId} | Sold ${Number(sharesAmount) / 1e6} Shares`);
+    console.log(`   Received: ${Number(result.usdcOut) / 1e6} USDC`);
 
     return {
-        success: true,
-        usdcReceived: result.usdcOut,
-        priceImpact: result.priceImpact,
-        availableBalance: newBalance.available
+      success: true,
+      usdcReceived: result.usdcOut,
+      priceImpact: result.priceImpact,
+      availableBalance: newBalance.available
     };
   }
 

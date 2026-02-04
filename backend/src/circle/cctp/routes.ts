@@ -42,21 +42,26 @@ export function createCctpRouter(cctpService: CctpService): Router {
             }
 
             const availableChains = [...Object.keys(CCTP_CONTRACTS)];
-            // We allow 'arcTestnet' if logic requires, but relay flow is usually cross-chain
             if (!availableChains.includes(sourceChain)) {
                 return res.status(400).json({
                     error: `Invalid bridge source chain. Available: ${availableChains.join(', ')}`
                 });
             }
 
-            // Call finalize (Relayer Flow)
-            const result = await cctpService.finalizeSmartDeposit(
-                txHash,
-                sourceChain,
-                userAddress
-            );
+            console.log(`[CCTP] Starting async deposit for ${txHash}`);
 
-            res.json({ success: true, ...result });
+            // Start async process (fire and forget)
+            // The frontend will poll /status/:txHash to check progress
+            cctpService.finalizeSmartDeposit(
+                txHash as `0x${string}`,
+                sourceChain as any,
+                userAddress as `0x${string}`
+            ).catch(err => {
+                console.error(`[CCTP] Background deposit failed for ${txHash}:`, err);
+            });
+
+            // Return immediately to let frontend start polling
+            res.json({ success: true, status: 'processing', txHash });
         } catch (error: any) {
             console.error('[Deposit Route Error]', error);
             res.status(500).json({
@@ -73,6 +78,16 @@ export function createCctpRouter(cctpService: CctpService): Router {
         } catch (error: any) {
             // Log but don't crash if user has no balance (might return 0s normally)
             console.error('[Vault Balance Error]', error.message);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    router.get('/status/:txHash', (req, res) => {
+        try {
+            const txHash = req.params.txHash as `0x${string}`;
+            const status = cctpService.getJobStatus(txHash);
+            res.json({ status });
+        } catch (error: any) {
             res.status(500).json({ error: error.message });
         }
     });

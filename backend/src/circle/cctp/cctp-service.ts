@@ -341,6 +341,16 @@ export class CctpService {
     }
     throw new Error('Timeout fetching attestation after 10 minutes');
   }
+  // Track status of bridge jobs: txHash -> status
+  public jobStatuses = new Map<Hex, string>();
+
+  /**
+   * Get status of a bridge job
+   */
+  public getJobStatus(txHash: Hex): string {
+    return this.jobStatuses.get(txHash) || 'unknown';
+  }
+
   /**
     * Finalize Smart Deposit (Relayer Flow)
     */
@@ -350,93 +360,101 @@ export class CctpService {
     userAddress: Address
   ): Promise<{ step: string; txHash: Hex }> {
     console.log(`[FinalizeDeposit] Processing bridge tx: ${txHash} for user ${userAddress}`);
+    this.jobStatuses.set(txHash, 'waiting_attestation');
 
-    const sourceDomain = DOMAINS[sourceChainName];
-    // @ts-ignore
-    const destConfig = CCTP_CONTRACTS['arcTestnet'];
-    const chain = this.chains.arcTestnet;
-
-    if (!chain) throw new Error('Arc Testnet not configured');
-
-    // 1. Fetch Attestation
-    const attestationResult = await this.fetchAttestation(sourceDomain, txHash);
-    const { message, attestation } = attestationResult;
-
-    // 2. Mint to Backend
-    const messageTransmitter = getContract({
-      address: destConfig.messageTransmitter as Address,
-      abi: messageTransmitterAbi,
-      client: { public: chain.publicClient, wallet: chain.walletClient }
-    });
-
-    const usdc = getContract({
-      address: USDC_ADDRESSES_TESTNET.arcTestnet,
-      abi: erc20Abi,
-      client: { public: chain.publicClient, wallet: chain.walletClient }
-    });
-
-    const preUSDC = await usdc.read.balanceOf([this.account.address]);
-
-    console.log(`[CCTP] Minting (receiveMessage)...`);
-    const mintTx = await messageTransmitter.write.receiveMessage([
-      message,
-      attestation
-    ], { account: this.account, chain: chain.chain });
-    await chain.publicClient.waitForTransactionReceipt({ hash: mintTx });
-
-    const postUSDC = await usdc.read.balanceOf([this.account.address]);
-    const amountMinted = postUSDC - preUSDC;
-    console.log(`[CCTP] Minted: ${Number(amountMinted) / 1e6} USDC`);
-
-    if (amountMinted <= 0n) {
-      throw new Error("Minted 0 USDC. Cannot deposit.");
-    }
-
-    // 3. Deposit to Vault (Gateway Flow)
-    // ArcYieldVault uses onGatewayDeposit for cross-chain credits (no shares)
-
-    const vault = getContract({
-      address: ARC_VAULT_ADDRESS,
-      abi: vaultAbi,
-      client: { public: chain.publicClient, wallet: chain.walletClient }
-    });
-
-    // A. Claim Gateway Role (if needed)
-    // Note: If backend is NOT owner, this will revert. We assume backend deployed/owns vault.
     try {
-      const currentGateway = await vault.read.circleGateway();
-      if (currentGateway.toLowerCase() !== this.account.address.toLowerCase()) {
-        console.log(`[Vault] Claiming Gateway role (current: ${currentGateway})...`);
-        const setTx = await vault.write.setCircleGateway([this.account.address], { account: this.account, chain: chain.chain });
-        await chain.publicClient.waitForTransactionReceipt({ hash: setTx });
-        console.log(`[Vault] Gateway role claimed.`);
+      const sourceDomain = DOMAINS[sourceChainName];
+      // @ts-ignore
+      const destConfig = CCTP_CONTRACTS['arcTestnet'];
+      const chain = this.chains.arcTestnet;
+
+      if (!chain) throw new Error('Arc Testnet not configured');
+
+      // 1. Fetch Attestation
+      const attestationResult = await this.fetchAttestation(sourceDomain, txHash);
+      const { message, attestation } = attestationResult;
+
+      // 2. Mint to Backend
+      this.jobStatuses.set(txHash, 'minting');
+      const messageTransmitter = getContract({
+        address: destConfig.messageTransmitter as Address,
+        abi: messageTransmitterAbi,
+        client: { public: chain.publicClient, wallet: chain.walletClient }
+      });
+
+      const usdc = getContract({
+        address: USDC_ADDRESSES_TESTNET.arcTestnet,
+        abi: erc20Abi,
+        client: { public: chain.publicClient, wallet: chain.walletClient }
+      });
+
+      const preUSDC = await usdc.read.balanceOf([this.account.address]);
+
+      console.log(`[CCTP] Minting (receiveMessage)...`);
+      const mintTx = await messageTransmitter.write.receiveMessage([
+        message,
+        attestation
+      ], { account: this.account, chain: chain.chain });
+      await chain.publicClient.waitForTransactionReceipt({ hash: mintTx });
+
+      const postUSDC = await usdc.read.balanceOf([this.account.address]);
+      const amountMinted = postUSDC - preUSDC;
+      console.log(`[CCTP] Minted: ${Number(amountMinted) / 1e6} USDC`);
+
+      if (amountMinted <= 0n) {
+        throw new Error("Minted 0 USDC. Cannot deposit.");
       }
-    } catch (e: any) {
-      console.warn(`[Vault] Failed to check/set Gateway role (ignoring if already set): ${e.message}`);
+
+      // 3. Deposit to Vault (Gateway Flow)
+      // ArcYieldVault uses onGatewayDeposit for cross-chain credits (no shares)
+
+      const vault = getContract({
+        address: ARC_VAULT_ADDRESS,
+        abi: vaultAbi,
+        client: { public: chain.publicClient, wallet: chain.walletClient }
+      });
+
+      // A. Claim Gateway Role (if needed)
+      // Note: If backend is NOT owner, this will revert. We assume backend deployed/owns vault.
+      try {
+        const currentGateway = await vault.read.circleGateway();
+        if (currentGateway.toLowerCase() !== this.account.address.toLowerCase()) {
+          console.log(`[Vault] Claiming Gateway role (current: ${currentGateway})...`);
+          const setTx = await vault.write.setCircleGateway([this.account.address], { account: this.account, chain: chain.chain });
+          await chain.publicClient.waitForTransactionReceipt({ hash: setTx });
+          console.log(`[Vault] Gateway role claimed.`);
+        }
+      } catch (e: any) {
+        console.warn(`[Vault] Failed to check/set Gateway role (ignoring if already set): ${e.message}`);
+      }
+
+      // B. Transfer USDC to Vault
+      console.log(`[Vault] Transferring ${Number(amountMinted) / 1e6} USDC to Vault...`);
+      const transferTx = await usdc.write.transfer(
+        [ARC_VAULT_ADDRESS, amountMinted],
+        { account: this.account, chain: chain.chain }
+      );
+      await chain.publicClient.waitForTransactionReceipt({ hash: transferTx });
+      console.log(`[Vault] Transfer confirmed: ${transferTx}`);
+
+      // C. Call onGatewayDeposit
+      console.log(`[Vault] Crediting user ${userAddress}...`);
+      const creditTx = await vault.write.onGatewayDeposit(
+        [userAddress, amountMinted, sourceDomain],
+        { account: this.account, chain: chain.chain }
+      );
+      await chain.publicClient.waitForTransactionReceipt({ hash: creditTx });
+      console.log(`[Vault] User Credited: ${creditTx}`);
+
+      return {
+        step: 'complete',
+        txHash: creditTx,
+      };
+    } catch (error) {
+      console.error('[FinalizeDeposit] Error:', error);
+      this.jobStatuses.set(txHash, 'error');
+      throw error;
     }
-
-    // B. Transfer USDC to Vault
-    console.log(`[Vault] Transferring ${Number(amountMinted) / 1e6} USDC to Vault...`);
-    const transferTx = await usdc.write.transfer(
-      [ARC_VAULT_ADDRESS, amountMinted],
-      { account: this.account, chain: chain.chain }
-    );
-    await chain.publicClient.waitForTransactionReceipt({ hash: transferTx });
-    console.log(`[Vault] Transfer confirmed: ${transferTx}`);
-
-    // C. Call onGatewayDeposit
-    console.log(`[Vault] Crediting user ${userAddress}...`);
-    const creditTx = await vault.write.onGatewayDeposit(
-      [userAddress, amountMinted, sourceDomain],
-      { account: this.account, chain: chain.chain }
-    );
-    await chain.publicClient.waitForTransactionReceipt({ hash: creditTx });
-    console.log(`[Vault] User Credited: ${creditTx}`);
-
-    return {
-      step: 'complete',
-      txHash: creditTx,
-    };
   }
 
   /**
