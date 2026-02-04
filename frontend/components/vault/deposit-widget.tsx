@@ -50,10 +50,9 @@ const VAULT_ABI = [
         type: "function",
         stateMutability: "nonpayable",
         inputs: [
-            { name: "assets", type: "uint256" },
-            { name: "receiver", type: "address" },
+            { name: "amount", type: "uint256" },
         ],
-        outputs: [{ name: "", type: "uint256" }],
+        outputs: [],
     },
 ] as const
 
@@ -335,7 +334,7 @@ export function DepositWidget() {
                 address: ARC_VAULT_ADDRESS,
                 abi: VAULT_ABI,
                 functionName: "deposit",
-                args: [amountBig, address]
+                args: [amountBig]
             })
         }
     }
