@@ -1,8 +1,17 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Shield, TrendingUp, Wallet, Loader2 } from "lucide-react"
+import { Shield, TrendingUp, Wallet, Loader2, Minus } from "lucide-react"
 import { useArcVault } from "@/hooks/use-arc-vault"
+import { useQuery } from "@tanstack/react-query"
+
+// Fetch user positions
+async function fetchUserPositions(userId: string) {
+    if (!userId) return { positions: [], totalValue: '0' };
+    const response = await fetch(`/api/amm/positions/${userId}`);
+    if (!response.ok) return { positions: [], totalValue: '0' };
+    return response.json();
+}
 
 export function StreamingBalance() {
     // Handle hydration mismatch
@@ -19,14 +28,30 @@ export function StreamingBalance() {
         totalBalance,
         apyPercent,
         isLoading,
-        isConnected
+        isConnected,
+        sessionId
     } = useArcVault()
+
+    // Fetch user positions to calculate positions value
+    const { data: positionsData } = useQuery({
+        queryKey: ['user-positions', sessionId],
+        queryFn: () => fetchUserPositions(sessionId || ''),
+        enabled: !!sessionId,
+        refetchInterval: 10000, // Refetch every 10 seconds
+    })
 
     // Parse values for display
     const principalNum = parseFloat(principal) || 0
     const accruedYieldNum = parseFloat(accruedYield) || 0
     const totalBalanceNum = parseFloat(totalBalance) || 0
     const apyNum = parseFloat(apyPercent) || 0
+    
+    // Calculate positions value (shares are in micro units, divide by 1M)
+    const positionsValueMicro = parseFloat(positionsData?.totalValue || '0')
+    const positionsValue = positionsValueMicro / 1_000_000
+    
+    // Available = Accrued Yield - Positions Value (can be negative if over-bet)
+    const availableForTrading = Math.max(0, accruedYieldNum - positionsValue)
 
     // Calculate daily yield rate
     const dailyYield = (principalNum * (apyNum / 100)) / 365
@@ -142,17 +167,39 @@ export function StreamingBalance() {
                 </div>
             </div>
 
-            {/* Betting Power Display */}
-            <div className="border-t border-border/50 pt-6">
+            {/* Available for Trading Display */}
+            <div className="border-t border-border/50 pt-6 space-y-4">
+                {/* Calculation Breakdown */}
+                {positionsValue > 0 && (
+                    <div className="text-xs text-muted-foreground font-mono space-y-1">
+                        <div className="flex justify-between">
+                            <span>Accrued Yield:</span>
+                            <span className="text-green-500">${accruedYieldNum.toFixed(4)}</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                            <span className="flex items-center gap-1">
+                                <Minus className="h-3 w-3" /> In Positions:
+                            </span>
+                            <span className="text-orange-500">-${positionsValue.toFixed(4)}</span>
+                        </div>
+                        <div className="border-t border-border/30 pt-1"></div>
+                    </div>
+                )}
+                
                 <div className="rounded-lg border border-primary/30 bg-primary/10 p-4">
                     <div className="flex items-center justify-between">
                         <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
                             Available for Trading
                         </span>
                         <span className="font-mono text-lg font-bold text-primary">
-                            ${totalBalanceNum.toFixed(2)}
+                            ${availableForTrading.toFixed(4)}
                         </span>
                     </div>
+                    {positionsValue > 0 && (
+                        <p className="font-mono text-[10px] text-muted-foreground mt-1">
+                            (Yield minus open positions)
+                        </p>
+                    )}
                 </div>
             </div>
         </div>

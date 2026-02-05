@@ -21,6 +21,8 @@ import {
   createWalletClient,
   getContract,
   http,
+  encodeAbiParameters,
+  parseAbiParameters,
   type Address,
   type Hex,
   type PublicClient,
@@ -302,6 +304,47 @@ export class SessionOrchestrator {
         const txHash = await this.cancelTimedOutSession(user);
         res.json({ success: true, txHash });
       } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
+    });
+
+    // Close active session (reconcile with 0 PnL - for testing/demo)
+    this.router.post('/session/close', async (req, res) => {
+      try {
+        const { user, pnl = 0 } = req.body;
+        
+        // Get the session first to verify it's active
+        const session = await this.getSession(user);
+        if (session.phase !== SessionPhase.Active) {
+          return res.status(400).json({ 
+            error: `Session is not active (current state: ${session.phase})`,
+            session 
+          });
+        }
+        
+        // Construct dummy settlement proof (required for abi.decode in contract)
+        // Format: (bytes32 sessionId, int256 pnl, bytes[] signatures)
+        // Note: requiredSettlementSignatures must be 0 on contract for this to pass with empty signatures
+        const settlementProof = encodeAbiParameters(
+          parseAbiParameters('bytes32, int256, bytes[]'),
+          [session.sessionId, BigInt(pnl), []]
+        );
+
+        // Close with provided PnL (default 0) and valid dummy proof
+        const { reconcileTxHash } = await this.reconcileOnArc(
+          user,
+          BigInt(pnl),
+          settlementProof
+        );
+        
+        res.json({ 
+          success: true, 
+          txHash: reconcileTxHash,
+          pnl,
+          message: 'Session closed successfully'
+        });
+      } catch (error) {
+        console.error('[Session Close] Error:', error);
         res.status(500).json({ error: String(error) });
       }
     });

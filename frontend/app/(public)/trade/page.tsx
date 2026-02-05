@@ -8,6 +8,7 @@ import { OrderBook } from "@/components/trade/order-book"
 import { CreateMarketDialog, CreateMarketButton } from "@/components/trade/create-market-dialog"
 import { useMarkets } from "@/hooks/use-amm"
 import { useArcVault, SessionState } from "@/hooks/use-arc-vault"
+import { useAccount } from "wagmi"
 import type { Market } from "@/lib/amm-types"
 
 const SessionStartWidget = dynamic(
@@ -27,7 +28,8 @@ export default function TradePage() {
     const { data: marketsData } = useMarkets()
     
     // Check session state from vault
-    const { sessionState, isConnected } = useArcVault()
+    const { sessionState, sessionId, lockedAmount, isConnected } = useArcVault()
+    const { address } = useAccount()
     const hasActiveSession = sessionState === SessionState.Active || sessionState === SessionState.PendingBridge
 
     // Find the selected market from the markets list
@@ -71,7 +73,8 @@ export default function TradePage() {
                         {/* Order Book / Trade Panel */}
                         <OrderBook
                             selectedMarket={selectedMarket}
-                            userId="demo-user"
+                            userId={sessionId || address || "guest"}
+                            maxAmount={hasActiveSession ? lockedAmount : undefined}
                         />
                     </div>
 

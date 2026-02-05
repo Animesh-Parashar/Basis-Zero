@@ -324,6 +324,43 @@ export async function getMarketPositions(marketId: string): Promise<PositionRow[
     return data ?? [];
 }
 
+/**
+ * Ensure a session exists in the database (auto-create if not)
+ * This allows using on-chain sessionIds without explicit session registration
+ * The positions table has FK to sessions.session_id, so we need sessions not users
+ */
+export async function ensureSessionExists(sessionId: string, userAddress?: string): Promise<void> {
+    const supabase = getSupabase();
+
+    // Check if session already exists
+    const { data: existing } = await supabase
+        .from('sessions')
+        .select('session_id')
+        .eq('session_id', sessionId)
+        .single();
+
+    if (existing) return; // Session exists
+
+    // Auto-create session for betting
+    const { error } = await supabase
+        .from('sessions')
+        .insert({
+            session_id: sessionId,
+            user_address: userAddress || sessionId, // Use sessionId as fallback
+            status: 'OPEN',
+            initial_collateral: '0',
+            current_balance: '0',
+            latest_signature: 'auto-created',
+            nonce: 0
+        });
+
+    if (error && !error.message.includes('duplicate')) {
+        console.warn(`Warning: Could not ensure session exists: ${error.message}`);
+    } else {
+        console.log(`[AMM] Auto-created session: ${sessionId}`);
+    }
+}
+
 export async function upsertPosition(
     userId: string,
     marketId: string,
@@ -332,6 +369,9 @@ export async function upsertPosition(
     averageEntryPrice: number
 ): Promise<PositionRow> {
     const supabase = getSupabase();
+
+    // Auto-create session if not exists (userId is actually sessionId due to FK)
+    await ensureSessionExists(userId);
 
     const { data, error } = await supabase
         .from('positions')

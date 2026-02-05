@@ -198,6 +198,36 @@ ammRouter.get('/pending-resolution', async (req, res) => {
     }
 });
 
+// Get all positions for a user across all markets
+ammRouter.get('/positions/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        // Import getUserPositions from db
+        const { getUserPositions } = await import('../db/amm-repository.js');
+        const positions = await getUserPositions(userId);
+        
+        // Calculate total value (shares are in USDC micro units)
+        let totalValue = 0n;
+        for (const pos of positions) {
+            totalValue += BigInt(pos.shares || '0');
+        }
+        
+        res.json({ 
+            positions: positions.map((p: { market_id: string; outcome: string; shares: string; average_entry_price: number }) => ({
+                marketId: p.market_id,
+                outcome: p.outcome,
+                shares: p.shares,
+                averageEntryPrice: p.average_entry_price
+            })),
+            totalValue: totalValue.toString()
+        });
+    } catch (err) {
+        console.error('[AMM User Positions] Error:', err);
+        res.status(500).json({ error: String(err), positions: [], totalValue: '0' });
+    }
+});
+
 
 // Get user position
 ammRouter.get('/position/:marketId/:userId', async (req, res) => {

@@ -2,19 +2,21 @@
 
 import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
-import { Loader2, Check, AlertCircle } from "lucide-react"
-import { useQuote, usePlaceBet, usePosition } from "@/hooks/use-amm"
+import { Loader2, Check, AlertCircle, TrendingDown } from "lucide-react"
+import { useQuote, usePlaceBet, usePosition, useSellPosition } from "@/hooks/use-amm"
 import { Outcome, formatUSDC, parseUSDCInput } from "@/lib/amm-types"
 import type { Market, Position } from "@/lib/amm-types"
 
 interface OrderBookProps {
     selectedMarket?: Market | null
     userId?: string
+    maxAmount?: string // Max betting amount (locked session amount)
 }
 
-export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookProps) {
+export function OrderBook({ selectedMarket, userId = "demo-user", maxAmount }: OrderBookProps) {
     const [amount, setAmount] = useState("")
     const [selectedOutcome, setSelectedOutcome] = useState<Outcome | null>(null)
+    const [sellingOutcome, setSellingOutcome] = useState<Outcome | null>(null)
 
     // Get quote for the selected amount and outcome
     const usdcAmount = parseUSDCInput(amount)
@@ -33,6 +35,9 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
 
     // Place bet mutation
     const placeBetMutation = usePlaceBet()
+    
+    // Sell position mutation
+    const sellMutation = useSellPosition()
 
     // Reset form when market changes
     useEffect(() => {
@@ -40,8 +45,14 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
         setSelectedOutcome(null)
     }, [selectedMarket?.marketId])
 
+    // Check if amount exceeds max
+    const maxAmountNum = maxAmount ? parseFloat(maxAmount) : Infinity
+    const currentAmountNum = parseFloat(amount) || 0
+    const exceedsMax = currentAmountNum > maxAmountNum
+
     const handleBuy = async (outcome: Outcome) => {
         if (!selectedMarket || !amount || parseFloat(amount) <= 0) return
+        if (exceedsMax) return // Don't allow if exceeds max
 
         setSelectedOutcome(outcome)
 
@@ -56,6 +67,25 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
             setSelectedOutcome(null)
         } catch (error) {
             console.error("Failed to place bet:", error)
+        }
+    }
+
+    const handleSell = async (outcome: Outcome, sharesAmount: string) => {
+        if (!selectedMarket || !sharesAmount) return
+        
+        setSellingOutcome(outcome)
+        
+        try {
+            await sellMutation.mutateAsync({
+                marketId: selectedMarket.marketId,
+                userId,
+                amount: sharesAmount,
+                outcome,
+            })
+            setSellingOutcome(null)
+        } catch (error) {
+            console.error("Failed to sell position:", error)
+            setSellingOutcome(null)
         }
     }
 
@@ -110,9 +140,16 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
 
                     {/* Amount Input */}
                     <div className="space-y-2">
-                        <label className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-                            Amount (USDC)
-                        </label>
+                        <div className="flex justify-between items-center">
+                            <label className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
+                                Amount (USDC)
+                            </label>
+                            {maxAmount && (
+                                <span className="font-mono text-xs text-muted-foreground">
+                                    Max: <span className="text-primary">${parseFloat(maxAmount).toFixed(2)}</span>
+                                </span>
+                            )}
+                        </div>
                         <div className="relative">
                             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
                             <input
@@ -120,12 +157,33 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
                                 value={amount}
                                 onChange={(e) => setAmount(e.target.value)}
                                 placeholder="0.00"
-                                className="w-full rounded-lg border border-border bg-background/50 py-3 pl-7 pr-4 font-mono text-lg focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                                max={maxAmountNum}
+                                className={cn(
+                                    "w-full rounded-lg border bg-background/50 py-3 pl-7 pr-4 font-mono text-lg focus:outline-none focus:ring-1",
+                                    exceedsMax 
+                                        ? "border-red-500 focus:border-red-500 focus:ring-red-500" 
+                                        : "border-border focus:border-primary focus:ring-primary"
+                                )}
                             />
                         </div>
+                        {/* Warning when exceeds max */}
+                        {exceedsMax && (
+                            <p className="text-xs text-red-500 flex items-center gap-1">
+                                <AlertCircle className="h-3 w-3" />
+                                Exceeds session locked amount
+                            </p>
+                        )}
                         {/* Quick Amount Buttons */}
                         <div className="flex gap-2">
-                            {[10, 50, 100, 500].map((val) => (
+                            {maxAmount && (
+                                <button
+                                    onClick={() => setAmount(maxAmount)}
+                                    className="flex-1 rounded-md border border-primary/50 bg-primary/10 py-1.5 font-mono text-xs text-primary hover:bg-primary/20 transition-colors"
+                                >
+                                    MAX
+                                </button>
+                            )}
+                            {[10, 50, 100, 500].filter(v => !maxAmount || v <= parseFloat(maxAmount)).map((val) => (
                                 <button
                                     key={val}
                                     onClick={() => setAmount(val.toString())}
@@ -172,28 +230,70 @@ export function OrderBook({ selectedMarket, userId = "demo-user" }: OrderBookPro
 
                     {/* User Position */}
                     {position && (hasYesShares || hasNoShares) && (
-                        <div className="rounded-lg bg-primary/5 border border-primary/20 p-3">
-                            <p className="font-mono text-xs text-primary uppercase tracking-wider mb-2">
+                        <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-3">
+                            <p className="font-mono text-xs text-primary uppercase tracking-wider">
                                 Your Position
                             </p>
-                            <div className="flex gap-3">
+                            <div className="space-y-2">
                                 {hasYesShares && (
-                                    <div className="flex-1 text-center">
-                                        <p className="font-mono text-sm font-bold text-green-500">
-                                            {formatUSDC(position.yesShares)}
-                                        </p>
-                                        <p className="font-mono text-[10px] text-muted-foreground">YES shares</p>
+                                    <div className="flex items-center justify-between p-2 rounded bg-green-500/10 border border-green-500/20">
+                                        <div>
+                                            <p className="font-mono text-sm font-bold text-green-500">
+                                                {formatUSDC(position.yesShares)}
+                                            </p>
+                                            <p className="font-mono text-[10px] text-muted-foreground">YES shares</p>
+                                        </div>
+                                        <button
+                                            onClick={() => handleSell(Outcome.YES, position.yesShares)}
+                                            disabled={sellMutation.isPending && sellingOutcome === Outcome.YES}
+                                            className="px-3 py-1.5 rounded text-xs font-mono bg-green-500/20 text-green-500 hover:bg-green-500/30 transition-colors flex items-center gap-1 disabled:opacity-50"
+                                        >
+                                            {sellMutation.isPending && sellingOutcome === Outcome.YES ? (
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                            ) : (
+                                                <TrendingDown className="h-3 w-3" />
+                                            )}
+                                            Sell All
+                                        </button>
                                     </div>
                                 )}
                                 {hasNoShares && (
-                                    <div className="flex-1 text-center">
-                                        <p className="font-mono text-sm font-bold text-red-500">
-                                            {formatUSDC(position.noShares)}
-                                        </p>
-                                        <p className="font-mono text-[10px] text-muted-foreground">NO shares</p>
+                                    <div className="flex items-center justify-between p-2 rounded bg-red-500/10 border border-red-500/20">
+                                        <div>
+                                            <p className="font-mono text-sm font-bold text-red-500">
+                                                {formatUSDC(position.noShares)}
+                                            </p>
+                                            <p className="font-mono text-[10px] text-muted-foreground">NO shares</p>
+                                        </div>
+                                        <button
+                                            onClick={() => handleSell(Outcome.NO, position.noShares)}
+                                            disabled={sellMutation.isPending && sellingOutcome === Outcome.NO}
+                                            className="px-3 py-1.5 rounded text-xs font-mono bg-red-500/20 text-red-500 hover:bg-red-500/30 transition-colors flex items-center gap-1 disabled:opacity-50"
+                                        >
+                                            {sellMutation.isPending && sellingOutcome === Outcome.NO ? (
+                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                            ) : (
+                                                <TrendingDown className="h-3 w-3" />
+                                            )}
+                                            Sell All
+                                        </button>
                                     </div>
                                 )}
                             </div>
+                            
+                            {/* Sell success/error feedback */}
+                            {sellMutation.isSuccess && (
+                                <div className="flex items-center gap-2 text-green-500 text-xs justify-center">
+                                    <Check className="h-3 w-3" />
+                                    <span>Position sold successfully!</span>
+                                </div>
+                            )}
+                            {sellMutation.isError && (
+                                <div className="flex items-center gap-2 text-red-500 text-xs justify-center">
+                                    <AlertCircle className="h-3 w-3" />
+                                    <span>{sellMutation.error?.message || 'Failed to sell'}</span>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

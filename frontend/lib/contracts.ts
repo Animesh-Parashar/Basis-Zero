@@ -191,6 +191,17 @@ export const ARC_VAULT_ABI = [
     stateMutability: "nonpayable",
     inputs: [{ name: "user", type: "address" }],
     outputs: []
+  },
+  {
+    name: "reconcileSession",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "pnl", type: "int256" },
+      { name: "proof", type: "bytes" }
+    ],
+    outputs: []
   }
 ] as const
 

@@ -43,8 +43,21 @@ if (process.env.PRIVATE_KEY) {
 }
 
 // Yellow Network routes  
-// Yellow Network routes  
 app.use('/api/session', yellowSession.router);
+
+// Session Orchestrator routes (close/cancel sessions via relayer)
+import { createSessionOrchestrator } from './sessions';
+if (process.env.PRIVATE_KEY && process.env.ARC_VAULT_ADDRESS) {
+  try {
+    const sessionOrchestrator = createSessionOrchestrator();
+    app.use('/api/sessions', sessionOrchestrator.router);
+    console.log('🟡 Session Orchestrator routes enabled');
+  } catch (error) {
+    console.warn('⚠️ Session Orchestrator failed to initialize:', error);
+  }
+} else {
+  console.warn('⚠️ Session Orchestrator not initialized (missing PRIVATE_KEY or ARC_VAULT_ADDRESS)');
+}
 
 // AMM Market routes (Internal Logic)
 app.use('/api/amm', ammRouter);
