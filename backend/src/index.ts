@@ -12,6 +12,7 @@ import cors from 'cors';
 import { YellowSessionService } from './yellow/session-service';
 import { MarketResolver } from './markets/resolver';
 import { ammRouter } from './amm/router';
+import { sessionsRouter } from './sessions/router';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -31,6 +32,10 @@ app.get('/health', (_req, res) => {
 // Yellow Network routes  
 app.use('/api/session', yellowSession.router);
 
+// Sessions Management routes (Testing)
+app.use('/api/sessions', sessionsRouter);
+console.log('🟢 Sessions management routes enabled');
+
 // AMM Market routes (Internal Logic)
 app.use('/api/amm', ammRouter);
 console.log('🟢 AMM Market routes enabled');
@@ -42,6 +47,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Basis-Zero Backend running on port ${PORT}`);
   console.log(`   📍 Health: http://localhost:${PORT}/health`);
   console.log(`   📍 Sessions: http://localhost:${PORT}/api/session`);
+  console.log(`   📍 Sessions Management: http://localhost:${PORT}/api/sessions`);
   console.log(`   📍 AMM: http://localhost:${PORT}/api/amm`);
   console.log(`   📍 Markets: http://localhost:${PORT}/api/markets`);
 });

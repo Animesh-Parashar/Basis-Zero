@@ -148,6 +148,35 @@ export async function resolveMarket(
 ): Promise<void> {
     const supabase = getSupabase();
 
+    // First, fetch the market to check expiry
+    const { data: market, error: fetchError } = await supabase
+        .from('markets')
+        .select('expires_at, status, resolver_address')
+        .eq('market_id', marketId)
+        .single();
+
+    if (fetchError || !market) {
+        throw new Error(`Market not found: ${marketId}`);
+    }
+
+    // Check if market is already resolved
+    if (market.status === 'RESOLVED') {
+        throw new Error('Market is already resolved');
+    }
+
+    // Check if market has expired (resolver can only resolve AFTER expiry)
+    const expiresAt = new Date(market.expires_at);
+    const now = new Date();
+    if (now < expiresAt) {
+        throw new Error(`Market cannot be resolved until after expiry: ${expiresAt.toISOString()}`);
+    }
+
+    // Optionally validate resolver address (if set)
+    if (market.resolver_address && resolvedBy && 
+        market.resolver_address.toLowerCase() !== resolvedBy.toLowerCase()) {
+        throw new Error(`Unauthorized resolver. Only ${market.resolver_address} can resolve this market.`);
+    }
+
     const { error } = await supabase
         .from('markets')
         .update({
@@ -396,13 +425,21 @@ export async function upsertPosition(
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function marketRowToPoolState(row: MarketRow): PoolState {
+    const yesReserves = BigInt(row.yes_reserves);
+    const noReserves = BigInt(row.no_reserves);
+    
+    // Calculate total collateral from reserves
+    // In our AMM: totalCollateral should equal the sum of both reserves
+    // because each USDC creates 1 YES + 1 NO share
+    const totalCollateral = yesReserves + noReserves;
+    
     return {
         marketId: row.market_id,
-        yesReserves: BigInt(row.yes_reserves),
-        noReserves: BigInt(row.no_reserves),
+        yesReserves,
+        noReserves,
         k: BigInt(row.k_invariant),
-        virtualLiquidity: BigInt(row.yes_reserves), // Assume initial liquidity = reserves
-        totalCollateral: 0n,
+        virtualLiquidity: yesReserves, // Use initial reserves as virtual liquidity
+        totalCollateral,
         createdAt: new Date(row.created_at).getTime(),
         updatedAt: Date.now()
     };

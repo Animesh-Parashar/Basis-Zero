@@ -175,6 +175,8 @@ export async function getMarketDB(marketId: string): Promise<MarketWithMetadata 
 
 /**
  * Place a bet on a market (updates database)
+ * @param userId - The session ID (from activeSessionId) or wallet address
+ * Note: When using sessions, userId should be the session_id for proper balance tracking
  */
 export async function placeBetDB(
     marketId: string,
@@ -192,17 +194,17 @@ export async function placeBetDB(
     if (!row) throw new Error(`Market ${marketId} not found`);
     if (row.status !== 'ACTIVE') throw new Error(`Market ${marketId} is not active`);
 
+    // Check if userId is a session and has sufficient balance
+    const session = await db.getSession(userId);
+    if (session) {
+        const currentBalance = BigInt(session.current_balance);
+        if (currentBalance < usdcAmount) {
+            throw new Error(`Insufficient session balance. Available: ${currentBalance}, Required: ${usdcAmount}`);
+        }
+    }
+
     // Convert to pool state for AMM calculations
-    const pool: PoolState = {
-        marketId: row.market_id,
-        yesReserves: BigInt(row.yes_reserves),
-        noReserves: BigInt(row.no_reserves),
-        k: BigInt(row.k_invariant),
-        virtualLiquidity: BigInt(row.yes_reserves),
-        totalCollateral: 0n,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: Date.now()
-    };
+    const pool: PoolState = db.marketRowToPoolState(row);
 
     // Execute bet using AMM
     const result = placeBet(pool, usdcAmount, outcome);
@@ -221,6 +223,13 @@ export async function placeBetDB(
     const newShares = currentShares + result.totalShares;
 
     await db.upsertPosition(userId, marketId, outcome, newShares, result.effectivePrice);
+
+    // Deduct from session balance if this is a session-based bet
+    if (session) {
+        const newBalance = BigInt(session.current_balance) - usdcAmount;
+        const newNonce = session.nonce + 1;
+        await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
+    }
 
     // Calculate new prices
     const newYesReserves = result.newPoolState.yesReserves;
@@ -250,16 +259,7 @@ export async function quoteBetDB(
     const row = await db.getMarket(marketId);
     if (!row || row.status !== 'ACTIVE') return null;
 
-    const pool: PoolState = {
-        marketId: row.market_id,
-        yesReserves: BigInt(row.yes_reserves),
-        noReserves: BigInt(row.no_reserves),
-        k: BigInt(row.k_invariant),
-        virtualLiquidity: BigInt(row.yes_reserves),
-        totalCollateral: 0n,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: Date.now()
-    };
+    const pool: PoolState = db.marketRowToPoolState(row);
 
     const quote = quoteBet(pool, usdcAmount, outcome);
     if (!quote) return null;
@@ -313,16 +313,7 @@ export async function sellPositionDB(
     }
 
     // Convert to pool state
-    const pool: PoolState = {
-        marketId: row.market_id,
-        yesReserves: BigInt(row.yes_reserves),
-        noReserves: BigInt(row.no_reserves),
-        k: BigInt(row.k_invariant),
-        virtualLiquidity: BigInt(row.yes_reserves),
-        totalCollateral: 0n,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: Date.now()
-    };
+    const pool: PoolState = db.marketRowToPoolState(row);
 
     // Execute sell using AMM
     const result = sellPosition(pool, sharesAmount, outcome);
@@ -338,6 +329,14 @@ export async function sellPositionDB(
     // Update user position
     const newShares = currentShares - sharesAmount;
     await db.upsertPosition(userId, marketId, outcome, newShares, existingPos.average_entry_price);
+
+    // Credit session balance if this is a session-based sell
+    const session = await db.getSession(userId);
+    if (session) {
+        const newBalance = BigInt(session.current_balance) + result.usdcOut;
+        const newNonce = session.nonce + 1;
+        await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
+    }
 
     // Calculate new prices
     const newYesReserves = result.newPoolState.yesReserves;
@@ -440,7 +439,8 @@ export async function claimWinningsDB(
     await db.upsertPosition(userId, marketId, winningOutcome, 0n, position.average_entry_price);
 
     // 5. Update User Balance (Session)
-    const session = await db.getSessionByUser(userId);
+    // userId is actually the session_id when trading through sessions
+    const session = await db.getSession(userId);
     if (!session) {
         throw new Error('No active session found to credit winnings');
     }

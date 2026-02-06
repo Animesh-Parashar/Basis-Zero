@@ -126,17 +126,24 @@ ammRouter.post('/bet', async (req, res) => {
         // Outcome: 0 = YES, 1 = NO
         const outcomeEnum = Number(outcome) === 0 ? Outcome.YES : Outcome.NO;
 
+        // Validate bet amount
+        const betAmount = BigInt(amount);
+        if (betAmount <= 0n) {
+            return res.status(400).json({ error: 'Bet amount must be positive' });
+        }
+
         const result = await placeBetDB(
             marketId,
             userId,
-            BigInt(amount),
+            betAmount,
             outcomeEnum
         );
 
         res.json(result);
     } catch (err) {
         console.error('[AMM Bet] Error:', err);
-        res.status(500).json({ error: String(err) });
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        res.status(500).json({ error: errorMessage });
     }
 });
 
