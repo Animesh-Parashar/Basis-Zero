@@ -1,63 +1,43 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ArrowUpRight, ChevronDown, CheckCircle, AlertCircle, Loader2 } from "lucide-react"
+import { ArrowUpRight, CheckCircle, AlertCircle, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { useArcVault, SessionState } from "@/hooks/use-arc-vault"
+import { useSessionEscrow, SessionState } from "@/hooks/use-session-escrow"
 import { useSwitchChain, useChainId } from "wagmi"
-import { arcTestnet } from "@/lib/wagmi"
-
-const chains = [
-    { id: "arc", name: "Arc Testnet", icon: "🔵", fee: "~$0.00", isDefault: true },
-    { id: "ethereum", name: "Ethereum", icon: "🔷", fee: "~$5.00" },
-    { id: "base", name: "Base", icon: "🔵", fee: "~$0.10" },
-    { id: "arbitrum", name: "Arbitrum", icon: "🔶", fee: "~$0.30" },
-    { id: "polygon", name: "Polygon", icon: "🟣", fee: "~$0.05" },
-]
+import { polygonAmoy } from "viem/chains"
 
 export function WithdrawalWidget() {
     const {
-        totalBalance,
-        principal,
-        accruedYield,
+        available,
         sessionState,
-        isConnected,
-        isLoading,
         withdraw,
         isWithdrawing,
         isWithdrawSuccess,
-        withdrawError,
         refetch
-    } = useArcVault()
+    } = useSessionEscrow()
 
     const chainId = useChainId()
     const { switchChain } = useSwitchChain()
+    const isConnected = !!available // Simplified check
 
-    const [selectedChain, setSelectedChain] = useState(chains[0])
     const [amount, setAmount] = useState("")
-    const [isDropdownOpen, setIsDropdownOpen] = useState(false)
     const [showSuccess, setShowSuccess] = useState(false)
 
-    const availableBalance = parseFloat(totalBalance) || 0
-    const principalNum = parseFloat(principal) || 0
-    const yieldNum = parseFloat(accruedYield) || 0
-
-    // Check if user has active session (cannot withdraw during session)
-    const hasActiveSession = sessionState === SessionState.PendingBridge || sessionState === SessionState.Active
+    const availableBalance = parseFloat(available) || 0
+    const hasActiveSession = sessionState === SessionState.Active
 
     const handleWithdraw = () => {
         if (!isConnected) return
         
-        // Check chain
-        if (chainId !== arcTestnet.id) {
-            switchChain({ chainId: arcTestnet.id })
+        if (chainId !== polygonAmoy.id) {
+            switchChain({ chainId: polygonAmoy.id })
             return
         }
 
         withdraw(amount)
     }
 
-    // Show success state
     useEffect(() => {
         if (isWithdrawSuccess) {
             setShowSuccess(true)
@@ -71,7 +51,6 @@ export function WithdrawalWidget() {
 
     const withdrawAmount = parseFloat(amount) || 0
     const isValidAmount = withdrawAmount > 0 && withdrawAmount <= availableBalance && !hasActiveSession
-    const isWithdrawingPrincipal = withdrawAmount > yieldNum
 
     if (!isConnected) {
         return (
@@ -106,7 +85,7 @@ export function WithdrawalWidget() {
                         </h3>
                     </div>
                     <span className="font-mono text-[10px] text-muted-foreground">
-                        Arc Vault
+                        Polygon Vault
                     </span>
                 </div>
             </div>
@@ -118,14 +97,10 @@ export function WithdrawalWidget() {
                         Available to Withdraw
                     </p>
                     <p className="font-mono text-2xl font-bold">
-                        {isLoading ? (
-                            <Loader2 className="h-5 w-5 animate-spin" />
-                        ) : (
-                            `$${availableBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
-                        )}
+                         {`$${availableBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
                     </p>
                     <p className="text-xs text-muted-foreground mt-1">
-                        Principal: ${principalNum.toFixed(2)} | Yield: ${yieldNum.toFixed(2)}
+                        Combined Principal + Yield
                     </p>
                 </div>
 
@@ -168,46 +143,6 @@ export function WithdrawalWidget() {
                     </div>
                 </div>
 
-                {/* Summary */}
-                {withdrawAmount > 0 && (
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">You will receive</span>
-                            <span className="font-mono font-medium">${withdrawAmount.toLocaleString()} USDC</span>
-                        </div>
-                        <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">From yield</span>
-                            <span className="font-mono text-green-500">${Math.min(withdrawAmount, yieldNum).toFixed(2)}</span>
-                        </div>
-                        {isWithdrawingPrincipal && (
-                            <div className="flex items-center justify-between text-sm">
-                                <span className="text-muted-foreground">From principal</span>
-                                <span className="font-mono text-blue-500">${(withdrawAmount - yieldNum).toFixed(2)}</span>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {/* Error Display */}
-                {withdrawError && (
-                    <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-                        <AlertCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
-                        <p className="text-xs text-red-400">
-                            {withdrawError.message.split('\n')[0]}
-                        </p>
-                    </div>
-                )}
-
-                {/* Warning for principal withdrawal */}
-                {isWithdrawingPrincipal && withdrawAmount > 0 && (
-                    <div className="flex items-start gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3">
-                        <AlertCircle className="h-4 w-4 text-yellow-500 shrink-0 mt-0.5" />
-                        <p className="text-xs text-yellow-200">
-                            This withdrawal includes principal. Your future yield earnings will be reduced.
-                        </p>
-                    </div>
-                )}
-
                 {/* Withdraw Button */}
                 <button
                     onClick={handleWithdraw}
@@ -224,8 +159,8 @@ export function WithdrawalWidget() {
                             <Loader2 className="h-4 w-4 animate-spin" />
                             Processing...
                         </>
-                    ) : chainId !== arcTestnet.id ? (
-                        "Switch to Arc Testnet"
+                    ) : chainId !== polygonAmoy.id ? (
+                        "Switch to Polygon Amoy"
                     ) : (
                         "Withdraw"
                     )}

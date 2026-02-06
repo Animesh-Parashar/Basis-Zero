@@ -1,84 +1,298 @@
 "use client"
 
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
+import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useChainId, useSwitchChain } from "wagmi"
 import { SESSION_ESCROW_ADDRESS, SESSION_ESCROW_ABI, POLYGON_USDC_ADDRESS, ERC20_ABI } from "@/lib/contracts"
-import { formatUnits, parseUnits } from "viem"
-import { useState, useEffect } from "react"
+import { formatUnits, parseUnits, type Address, type Hex } from "viem"
+import { useMemo, useState, useCallback } from "react"
+import { polygonAmoy } from "viem/chains"
+
+export enum SessionState {
+    None = 0,
+    Active = 1,
+    Settled = 2
+}
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
 
 export function useSessionEscrow() {
     const { address, isConnected } = useAccount()
-    const [balance, setBalance] = useState("0")
+    const chainId = useChainId()
+    const { switchChain } = useSwitchChain()
+    
+    // Local state for generated sessionId
+    const [pendingSessionId, setPendingSessionId] = useState<Hex | null>(null)
 
-    // Read Balance (Polygon Amoy = chainId 80002)
-    const { data: balanceData, refetch: refetchBalance } = useReadContract({
-        address: SESSION_ESCROW_ADDRESS,
-        abi: SESSION_ESCROW_ABI,
-        functionName: "balances",
-        args: [address!],
-        chainId: 80002,
+    const ensureChain = () => {
+        if (chainId !== polygonAmoy.id) {
+            switchChain({ chainId: polygonAmoy.id })
+            return false
+        }
+        return true
+    }
+
+    // Read USDC Balance
+    const { data: usdcBalanceData, refetch: refetchUsdcBalance } = useReadContract({
+        address: POLYGON_USDC_ADDRESS,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [address as Address],
+        chainId: polygonAmoy.id,
         query: { enabled: !!address }
     })
 
-    // Read Allowance (Polygon Amoy = chainId 80002)
+    // Read Allowance
     const { data: allowanceData, refetch: refetchAllowance } = useReadContract({
         address: POLYGON_USDC_ADDRESS,
         abi: ERC20_ABI,
         functionName: "allowance",
-        args: [address!, SESSION_ESCROW_ADDRESS],
-        chainId: 80002,
+        args: [address as Address, SESSION_ESCROW_ADDRESS],
+        chainId: polygonAmoy.id,
         query: { enabled: !!address }
     })
 
-    useEffect(() => {
-        if (balanceData) {
-            // balanceData is [totalDeposited, lockedInSession, pendingWithdrawal]
-            // We care about totalDeposited - pendingWithdrawal (available)? 
-            // Or just totalDeposited. Let's use totalDeposited for now.
-            // @ts-ignore
-            setBalance(formatUnits(balanceData[0], 6)) // USDC has 6 decimals on Polygon
+    // Read Account Info from SessionEscrow
+    const { data: accountInfo, refetch: refetchAccount } = useReadContract({
+        address: SESSION_ESCROW_ADDRESS,
+        abi: SESSION_ESCROW_ABI,
+        functionName: "getAccountInfo",
+        args: [address as Address],
+        chainId: polygonAmoy.id,
+        query: { enabled: !!address }
+    })
+
+    const parsedAccount = useMemo(() => {
+        if (!accountInfo) return null
+        const [deposited, available, locked, activeSessionId, state] = accountInfo as [bigint, bigint, bigint, Hex, number]
+        return {
+            deposited: formatUnits(deposited, 6),
+            available: formatUnits(available, 6),
+            locked: formatUnits(locked, 6),
+            activeSessionId,
+            state: state as SessionState
         }
-    }, [balanceData])
+    }, [accountInfo])
+
+    const usdcBalance = useMemo(() => {
+        if (!usdcBalanceData) return "0"
+        return formatUnits(usdcBalanceData as bigint, 6)
+    }, [usdcBalanceData])
+
+    const allowance = useMemo(() => {
+        if (!allowanceData) return "0"
+        return formatUnits(allowanceData as bigint, 6)
+    }, [allowanceData])
 
     // Write: Approve
     const { writeContract: writeApprove, data: approveHash, isPending: isApproving } = useWriteContract()
     const { isLoading: isWaitingApprove, isSuccess: isApproveSuccess } = useWaitForTransactionReceipt({ hash: approveHash })
 
     // Write: Deposit
-    const { writeContract: writeDeposit, data: depositHash, isPending: isDepositing } = useWriteContract()
+    const { writeContract: writeDeposit, data: depositHash, isPending: isDepositing, error: depositError } = useWriteContract()
     const { isLoading: isWaitingDeposit, isSuccess: isDepositSuccess } = useWaitForTransactionReceipt({ hash: depositHash })
 
-    const deposit = async (amount: string) => {
-        const amountBig = parseUnits(amount, 6)
-        
-        // Check allowance
-        // @ts-ignore
-        if (!allowanceData || allowanceData < amountBig) {
-             writeApprove({
-                 address: POLYGON_USDC_ADDRESS,
-                 abi: ERC20_ABI,
-                 functionName: "approve",
-                 args: [SESSION_ESCROW_ADDRESS, amountBig]
-             })
-             // In a real app we'd wait for approve then deposit. handling this loosely for now.
-             return "approving"
-        }
+    // Write: Withdraw
+    const { writeContract: writeWithdraw, data: withdrawHash, isPending: isWithdrawing } = useWriteContract()
+    const { isLoading: isWaitingWithdraw, isSuccess: isWithdrawSuccess } = useWaitForTransactionReceipt({ hash: withdrawHash })
 
+    // Write: Open Session
+    const { writeContract: writeOpenSession, data: sessionHash, isPending: isOpeningSession } = useWriteContract()
+    const { isLoading: isWaitingSession, isSuccess: isSessionOpenSuccess } = useWaitForTransactionReceipt({ hash: sessionHash })
+
+
+    // Actions
+    const approve = (amount: string) => {
+        if (!ensureChain()) return
+        const amountBig = parseUnits(amount, 6)
+        writeApprove({
+            address: POLYGON_USDC_ADDRESS,
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [SESSION_ESCROW_ADDRESS, amountBig]
+        })
+    }
+
+    const deposit = (amount: string) => {
+        if (!ensureChain()) return
+        const amountBig = parseUnits(amount, 6)
         writeDeposit({
             address: SESSION_ESCROW_ADDRESS,
             abi: SESSION_ESCROW_ABI,
             functionName: "deposit",
             args: [amountBig]
         })
-        return "depositing"
+    }
+
+    const withdraw = (amount: string) => {
+        if (!ensureChain()) return
+        const amountBig = parseUnits(amount, 6)
+        writeWithdraw({
+            address: SESSION_ESCROW_ADDRESS,
+            abi: SESSION_ESCROW_ABI,
+            functionName: "withdraw",
+            args: [amountBig]
+        })
+    }
+
+    // Generate a bytes32 sessionId
+    const generateSessionId = async (): Promise<Hex> => {
+        const timestamp = Date.now()
+        const random = Math.floor(Math.random() * 1000000)
+        const sessionIdData = `${address}${timestamp}${random}`
+        const encoder = new TextEncoder()
+        const data = encoder.encode(sessionIdData)
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+        const hashArray = Array.from(new Uint8Array(hashBuffer))
+        return ('0x' + hashArray.map(b => b.toString(16).padStart(2, '0')).join('')) as Hex
+    }
+
+    const startSession = async (amount: string, safeMode: boolean = true) => {
+        if (!ensureChain()) return null
+        
+        // Generate sessionId
+        const sessionId = await generateSessionId()
+        setPendingSessionId(sessionId)
+        
+        const amountBig = parseUnits(amount, 6)
+
+        writeOpenSession({
+            address: SESSION_ESCROW_ADDRESS,
+            abi: SESSION_ESCROW_ABI,
+            functionName: "openSession",
+            args: [amountBig, sessionId]
+        })
+
+        return { sessionId, amount, safeMode }
+    }
+
+    // Backend Notification - call after contract tx confirms
+    const notifyBackendSessionStart = useCallback(async (
+        sessionId: Hex, 
+        collateral: string, 
+        safeMode: boolean
+    ) => {
+        if (!address) return null
+        
+        try {
+            const collateralBig = parseUnits(collateral, 6).toString()
+            
+            const response = await fetch(`${BACKEND_URL}/api/session/open`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userAddress: address,
+                    sessionId: sessionId,
+                    collateral: collateralBig,
+                    safeModeEnabled: safeMode,
+                    rwaRateBps: 520 // 5.2% APY
+                })
+            })
+            
+            if (!response.ok) {
+                const error = await response.json()
+                console.error("Backend session open failed:", error)
+                return null
+            }
+            return await response.json()
+        } catch (error) {
+            console.error("Backend session notification failed:", error)
+            return null
+        }
+    }, [address])
+
+    // Close session via backend (gets signature for contract settlement)
+    const closeSession = useCallback(async () => {
+        const sessionId = parsedAccount?.activeSessionId
+        if (!sessionId || sessionId === '0x0000000000000000000000000000000000000000000000000000000000000000') {
+            throw new Error("No active session")
+        }
+        
+        try {
+            const response = await fetch(`${BACKEND_URL}/api/session/close`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sessionId })
+            })
+            
+            if (!response.ok) {
+                const error = await response.json()
+                throw new Error(error.error || "Failed to close session")
+            }
+            
+            const data = await response.json()
+            // Returns: { success, pnl, signature, sessionId }
+            return data
+        } catch (error) {
+            console.error("Close session error:", error)
+            throw error
+        }
+    }, [parsedAccount?.activeSessionId])
+
+    // Get streaming balance from backend
+    const fetchStreamingBalance = useCallback(async (safeMode: boolean = true) => {
+        const sessionId = parsedAccount?.activeSessionId
+        if (!sessionId || sessionId === '0x0000000000000000000000000000000000000000000000000000000000000000') {
+            return { principal: "0", yield: "0", openBets: "0", available: "0" }
+        }
+        
+        try {
+            const response = await fetch(`${BACKEND_URL}/api/session/${sessionId}/balance?safeMode=${safeMode}`)
+            if (!response.ok) {
+                return { principal: "0", yield: "0", openBets: "0", available: "0" }
+            }
+            const data = await response.json()
+            return {
+                principal: formatUnits(BigInt(data.principal), 6),
+                yield: formatUnits(BigInt(data.yield), 6),
+                openBets: formatUnits(BigInt(data.openBets), 6),
+                available: formatUnits(BigInt(data.available), 6)
+            }
+        } catch {
+            return { principal: "0", yield: "0", openBets: "0", available: "0" }
+        }
+    }, [parsedAccount?.activeSessionId])
+
+    const refetch = () => {
+        refetchAccount()
+        refetchAllowance()
+        refetchUsdcBalance()
     }
 
     return {
-        balance,
-        available: balance, // simplified
+        // Data
+        deposited: parsedAccount?.deposited || "0",
+        available: parsedAccount?.available || "0",
+        locked: parsedAccount?.locked || "0",
+        sessionState: parsedAccount?.state ?? SessionState.None,
+        activeSessionId: parsedAccount?.activeSessionId,
+        usdcBalance,
+        allowance,
+        pendingSessionId,
+
+        // Actions
+        approve,
         deposit,
+        withdraw,
+        startSession,
+        notifyBackendSessionStart,
+        closeSession,
+        fetchStreamingBalance,
+
+        // States
         isApproving: isApproving || isWaitingApprove,
         isDepositing: isDepositing || isWaitingDeposit,
-        isSuccess: isDepositSuccess,
-        refetch: refetchBalance
+        isWithdrawing: isWithdrawing || isWaitingWithdraw,
+        isOpeningSession: isOpeningSession || isWaitingSession,
+        
+        // Success
+        isApproveSuccess,
+        isDepositSuccess,
+        isWithdrawSuccess,
+        isSessionOpenSuccess,
+        
+        // Hashes
+        depositHash,
+        sessionHash,
+        
+        refetch
     }
 }

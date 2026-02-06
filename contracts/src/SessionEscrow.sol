@@ -11,27 +11,15 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 /**
  * @title SessionEscrow
  * @author Basis-Zero Team
- * @notice Lightweight escrow contract on Yellow-supported chain (Polygon Amoy).
+ * @notice Lightweight escrow contract on Polygon Amoy.
  *         Holds session allowance for Yellow Nitrolite off-chain betting sessions.
  * 
  * Architecture:
- * - Receives bridged USDC from Arc via Circle Gateway
- * - Holds escrow during Yellow Nitrolite session
- * - Settles final PnL with multi-sig verification
- * - Produces settlement proof for Arc reconciliation
- * 
- * Economic Rules:
- * - Payout capped at escrow amount (no unbounded liability)
- * - Protocol fee: 10% of winnings (configurable)
- * - Losses: deducted from escrow, remainder returned
- * - Wins: paid from escrow (within cap)
- * 
- * Session Flow:
- * 1. Backend bridges USDC from Arc → receiveEscrow()
- * 2. Yellow Nitrolite runs off-chain session
- * 3. Session ends → settleSession() with participant signatures
- * 4. Funds distributed, settlement proof emitted
- * 5. Settlement proof relayed back to ArcYieldVault
+ * - Users deposit USDC directly -> deposit()
+ * - Users lock funds for a session -> openSession()
+ * - Yellow Nitrolite runs off-chain session
+ * - Session settles with signed PnL -> settleSession()
+ * - Users withdraw available funds -> withdraw()
  */
 contract SessionEscrow is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -43,17 +31,16 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════
     
     uint256 public constant BPS_DENOMINATOR = 10000;
-    uint256 public constant SESSION_TIMEOUT = 24 hours;  // Longer timeout for Yellow sessions
+    uint256 public constant SESSION_TIMEOUT = 24 hours;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ENUMS
     // ═══════════════════════════════════════════════════════════════════════════
     
-    enum EscrowState {
-        Empty,      // No escrow for this user
-        Funded,     // Escrow received, session can start
-        Active,     // Yellow session in progress
-        Settled     // Session settled (terminal)
+    enum SessionState {
+        None,       // No active session
+        Active,     // Funds locked, Yellow session in progress
+        Settled     // Session settled, funds returned to available balance
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -69,9 +56,6 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     /// @notice Protocol fee recipient
     address public protocolTreasury;
     
-    /// @notice Authorized relayers (can fund escrow and submit settlements)
-    mapping(address => bool) public authorizedRelayers;
-    
     /// @notice Trusted Yellow Nitrolite signers
     mapping(address => bool) public trustedNitroliteSigners;
     
@@ -79,54 +63,50 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     uint256 public requiredSignatures;
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // ESCROW STATE
+    // USER STATE
     // ═══════════════════════════════════════════════════════════════════════════
     
-    struct Escrow {
-        EscrowState state;
-        uint256 amount;           // USDC escrowed
-        bytes32 sessionId;        // Matching Arc session ID
-        uint256 fundedAt;         // When escrow was funded
-        address user;             // User who owns this escrow
+    struct UserAccount {
+        uint256 depositedAmount;  // Total funds deposited (Available + Locked)
+        uint256 lockedAmount;     // Funds currently locked in a session
+        bytes32 activeSessionId;  // Current session ID (if any)
+        uint256 sessionStartTime; // When the current session started
+        SessionState sessionState;
     }
     
-    /// @notice Escrows by session ID
-    mapping(bytes32 => Escrow) public escrows;
+    /// @notice User accounts
+    mapping(address => UserAccount) public accounts;
     
-    /// @notice User's current active session ID
-    mapping(address => bytes32) public userActiveSession;
+    /// @notice Session ID to User mapping (for settling)
+    mapping(bytes32 => address) public sessionUsers;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════
     
-    event EscrowReceived(
+    event Deposited(address indexed user, uint256 amount);
+    event Withdrawn(address indexed user, uint256 amount);
+    
+    event SessionOpened(
         address indexed user, 
         bytes32 indexed sessionId, 
         uint256 amount
-    );
-    
-    event SessionActivated(
-        address indexed user, 
-        bytes32 indexed sessionId
     );
     
     event SessionSettled(
         address indexed user,
         bytes32 indexed sessionId,
         int256 pnl,
-        uint256 userPayout,
-        uint256 protocolFee,
-        bytes settlementProof
+        uint256 netPayout,
+        uint256 protocolFee
     );
     
-    event EscrowTimedOut(
+    event SessionTimedOut(
         address indexed user,
         bytes32 indexed sessionId,
         uint256 refundAmount
     );
     
-    event RelayerAuthorized(address indexed relayer, bool authorized);
     event NitroliteSignerUpdated(address indexed signer, bool trusted);
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -134,15 +114,15 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════
     
     error ZeroAmount();
-    error UnauthorizedCaller();
-    error InvalidAddress();
-    error InvalidEscrowState(EscrowState current, EscrowState expected);
+    error ZeroAddress();
+    error InsufficientBalance();
+    error InvalidSessionState();
     error SessionIdMismatch();
     error UserAlreadyHasActiveSession();
     error InvalidSettlementProof();
     error InsufficientSignatures();
     error SessionNotTimedOut();
-    error PayoutExceedsEscrow();
+    error SessionNotFound();
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CONSTRUCTOR
@@ -154,7 +134,7 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
         uint256 _protocolFeeBps,
         uint256 _requiredSignatures
     ) Ownable(msg.sender) {
-        if (_usdc == address(0) || _treasury == address(0)) revert InvalidAddress();
+        if (_usdc == address(0) || _treasury == address(0)) revert ZeroAddress();
         
         USDC = IERC20(_usdc);
         protocolTreasury = _treasury;
@@ -163,65 +143,65 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // MODIFIERS
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    modifier onlyAuthorizedRelayer() {
-        if (!authorizedRelayers[msg.sender]) revert UnauthorizedCaller();
-        _;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ESCROW LIFECYCLE
+    // USER FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════
     
     /**
-     * @notice Receive escrowed USDC from Arc (via Gateway bridge)
-     * @dev Called by relayer after Gateway transfer completes
-     * @param user The user this escrow belongs to
-     * @param sessionId Unique session ID (must match Arc)
-     * @param amount Amount of USDC escrowed
+     * @notice Deposit USDC into the vault
+     * @param amount Amount to deposit
      */
-    function receiveEscrow(
-        address user,
-        bytes32 sessionId,
-        uint256 amount
-    ) external onlyAuthorizedRelayer nonReentrant {
+    function deposit(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
-        if (user == address(0)) revert InvalidAddress();
-        if (userActiveSession[user] != bytes32(0)) revert UserAlreadyHasActiveSession();
         
-        // Transfer USDC from relayer (who received it from bridge)
         USDC.safeTransferFrom(msg.sender, address(this), amount);
         
-        // Create escrow
-        escrows[sessionId] = Escrow({
-            state: EscrowState.Funded,
-            amount: amount,
-            sessionId: sessionId,
-            fundedAt: block.timestamp,
-            user: user
-        });
+        accounts[msg.sender].depositedAmount += amount;
         
-        userActiveSession[user] = sessionId;
-        
-        emit EscrowReceived(user, sessionId, amount);
+        emit Deposited(msg.sender, amount);
     }
     
     /**
-     * @notice Activate a session (Yellow Nitrolite channel opened)
-     * @param sessionId Session to activate
+     * @notice Withdraw available USDC
+     * @param amount Amount to withdraw
      */
-    function activateSession(bytes32 sessionId) external onlyAuthorizedRelayer {
-        Escrow storage e = escrows[sessionId];
+    function withdraw(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         
-        if (e.state != EscrowState.Funded) {
-            revert InvalidEscrowState(e.state, EscrowState.Funded);
-        }
+        UserAccount storage userAcc = accounts[msg.sender];
+        uint256 available = userAcc.depositedAmount - userAcc.lockedAmount;
         
-        e.state = EscrowState.Active;
+        if (amount > available) revert InsufficientBalance();
         
-        emit SessionActivated(e.user, sessionId);
+        userAcc.depositedAmount -= amount;
+        USDC.safeTransfer(msg.sender, amount);
+        
+        emit Withdrawn(msg.sender, amount);
+    }
+    
+    /**
+     * @notice Open a new session, locking funds
+     * @param amount Amount to lock for the session
+     * @param sessionId Unique session ID provided by backend/client
+     */
+    function openSession(uint256 amount, bytes32 sessionId) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        
+        UserAccount storage userAcc = accounts[msg.sender];
+        
+        if (userAcc.activeSessionId != bytes32(0)) revert UserAlreadyHasActiveSession();
+        
+        uint256 available = userAcc.depositedAmount - userAcc.lockedAmount;
+        if (amount > available) revert InsufficientBalance();
+        
+        // Lock funds
+        userAcc.lockedAmount = amount;
+        userAcc.activeSessionId = sessionId;
+        userAcc.sessionStartTime = block.timestamp;
+        userAcc.sessionState = SessionState.Active;
+        
+        sessionUsers[sessionId] = msg.sender;
+        
+        emit SessionOpened(msg.sender, sessionId, amount);
     }
     
     /**
@@ -229,116 +209,109 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
      * @param sessionId Session to settle
      * @param pnl Final profit/loss (positive = user won, negative = user lost)
      * @param signatures Array of signatures from Nitrolite participants
-     * @return settlementProof Encoded proof for Arc reconciliation
      */
     function settleSession(
         bytes32 sessionId,
         int256 pnl,
         bytes[] calldata signatures
-    ) external onlyAuthorizedRelayer nonReentrant returns (bytes memory settlementProof) {
-        Escrow storage e = escrows[sessionId];
+    ) external nonReentrant {
+        address user = sessionUsers[sessionId];
+        if (user == address(0)) revert SessionNotFound();
         
-        if (e.state != EscrowState.Active) {
-            revert InvalidEscrowState(e.state, EscrowState.Active);
-        }
+        UserAccount storage userAcc = accounts[user];
+        
+        if (userAcc.activeSessionId != sessionId) revert SessionIdMismatch();
+        if (userAcc.sessionState != SessionState.Active) revert InvalidSessionState();
         
         // Verify signatures
         _verifySettlement(sessionId, pnl, signatures);
         
-        address user = e.user;
-        uint256 escrowAmount = e.amount;
-        uint256 userPayout = 0;
+        // Resolve logic
+        uint256 locked = userAcc.lockedAmount;
+        uint256 payout = locked; // Start with principal
         uint256 protocolFee = 0;
         
         if (pnl >= 0) {
-            // User won
-            uint256 winnings = uint256(pnl);
+            // WIN: User gets Locked + Win - Fee
+            // (Note: In this simplified vault, money comes from... where?
+            //  In a real system, the counterparty (Yellow Node) would have deposited funds too.
+            //  Or the PnL comes from a liquidity pool.
+            //  For this "Yield Only" demo, funds might logically come from the accrued yield buffer or the 'House'
+            //  Since we don't have a House pool here, we assume the Contract Balance covers the win. 
+            //  IF contract runs out of money, user just gets what's there? 
+            //  Ideally, `settleSession` should only be called if we have funds.
+            //  For simplicity, we mint/transfer or assume the treasury Top-Up.)
             
-            // Cap winnings at escrow (no unbounded liability)
-            if (winnings > escrowAmount) {
-                winnings = escrowAmount;
-            }
+            uint256 winAmount = uint256(pnl);
             
-            // Calculate protocol fee (on winnings only)
-            protocolFee = (winnings * protocolFeeBps) / BPS_DENOMINATOR;
+            // Fee on winnings
+            protocolFee = (winAmount * protocolFeeBps) / BPS_DENOMINATOR;
+            uint256 netWin = winAmount - protocolFee;
             
-            // User gets escrow + winnings - fee
-            userPayout = escrowAmount + winnings - protocolFee;
+            payout += netWin;
             
-            // Note: In a real system, winnings would come from counterparty escrow
-            // For hackathon simplicity, we cap at own escrow
-            if (userPayout > escrowAmount) {
-                userPayout = escrowAmount;
-                protocolFee = 0;
+            // Update depositedAmount to reflect new balance
+            userAcc.depositedAmount += netWin;
+            
+            // In a real system, we'd transfer Fee to Treasury here or update bookkeeping
+            if (protocolFee > 0) {
+                 // We don't deduct from user deposit, we just don't credit it.
+                 // But we need to ensure the contract has the funds.
+                 // We assume the contract has funds.
+                USDC.safeTransfer(protocolTreasury, protocolFee);
             }
         } else {
-            // User lost
-            uint256 loss = uint256(-pnl);
-            
-            if (loss >= escrowAmount) {
-                // Total loss - nothing returned
-                userPayout = 0;
-            } else {
-                // Partial loss - return remainder
-                userPayout = escrowAmount - loss;
+            // LOSS
+            uint256 lossAmount = uint256(-pnl);
+            if (lossAmount > locked) {
+                // Total loss (should limit to locked amount)
+                lossAmount = locked;
             }
             
-            // No protocol fee on losses
-            protocolFee = 0;
+            payout -= lossAmount;
+            
+            // Update deposited amount
+            userAcc.depositedAmount -= lossAmount;
         }
         
-        // Mark settled
-        e.state = EscrowState.Settled;
-        userActiveSession[user] = bytes32(0);
+        // Unlock
+        userAcc.lockedAmount = 0;
+        userAcc.activeSessionId = bytes32(0);
+        userAcc.sessionState = SessionState.Settled;
+        delete sessionUsers[sessionId];
         
-        // Create settlement proof for Arc
-        settlementProof = abi.encode(sessionId, pnl, signatures);
-        
-        // Distribute funds
-        if (userPayout > 0) {
-            USDC.safeTransfer(user, userPayout);
-        }
-        if (protocolFee > 0) {
-            USDC.safeTransfer(protocolTreasury, protocolFee);
-        }
-        
-        emit SessionSettled(user, sessionId, pnl, userPayout, protocolFee, settlementProof);
-        
-        return settlementProof;
+        emit SessionSettled(user, sessionId, pnl, payout, protocolFee);
     }
     
     /**
-     * @notice Emergency timeout release if session gets stuck
-     * @param sessionId Session to release
+     * @notice Emergency timeout release
      */
     function timeoutRelease(bytes32 sessionId) external nonReentrant {
-        Escrow storage e = escrows[sessionId];
+        address user = sessionUsers[sessionId];
+        // Allow anyone to trigger, but usually user
+        if (user == address(0)) revert SessionNotFound();
         
-        // Only Funded or Active sessions can timeout
-        if (e.state != EscrowState.Funded && e.state != EscrowState.Active) {
-            revert InvalidEscrowState(e.state, EscrowState.Active);
-        }
+        UserAccount storage userAcc = accounts[user];
+        if (userAcc.sessionState != SessionState.Active) revert InvalidSessionState();
         
-        if (block.timestamp < e.fundedAt + SESSION_TIMEOUT) {
+        if (block.timestamp < userAcc.sessionStartTime + SESSION_TIMEOUT) {
             revert SessionNotTimedOut();
         }
         
-        address user = e.user;
-        uint256 refund = e.amount;
+        // Refund locked amount
+        uint256 amount = userAcc.lockedAmount;
+        userAcc.lockedAmount = 0;
+        userAcc.activeSessionId = bytes32(0);
+        userAcc.sessionState = SessionState.Settled;
+        delete sessionUsers[sessionId];
         
-        // Mark settled (via timeout)
-        e.state = EscrowState.Settled;
-        userActiveSession[user] = bytes32(0);
-        
-        // Refund full escrow to user
-        USDC.safeTransfer(user, refund);
-        
-        emit EscrowTimedOut(user, sessionId, refund);
+        emit SessionTimedOut(user, sessionId, amount);
     }
     
-    /**
-     * @notice Verify Nitrolite settlement signatures
-     */
+    // ═══════════════════════════════════════════════════════════════════════════
+    // INTERNAL FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════════════════
+
     function _verifySettlement(
         bytes32 sessionId,
         int256 pnl,
@@ -348,7 +321,6 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
             revert InsufficientSignatures();
         }
         
-        // Create message hash
         bytes32 messageHash = keccak256(abi.encodePacked(sessionId, pnl));
         bytes32 ethSignedHash = messageHash.toEthSignedMessageHash();
         
@@ -358,31 +330,18 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = ethSignedHash.recover(signatures[i]);
             
-            // Signatures must be in ascending order (prevents duplicates)
-            if (signer <= lastSigner) {
-                revert InvalidSettlementProof();
-            }
-            
-            if (trustedNitroliteSigners[signer]) {
-                validSignatures++;
-            }
+            if (signer <= lastSigner) revert InvalidSettlementProof(); // Enforce order
+            if (trustedNitroliteSigners[signer]) validSignatures++;
             
             lastSigner = signer;
         }
         
-        if (validSignatures < requiredSignatures) {
-            revert InsufficientSignatures();
-        }
+        if (validSignatures < requiredSignatures) revert InsufficientSignatures();
     }
-
+    
     // ═══════════════════════════════════════════════════════════════════════════
     // ADMIN FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════
-    
-    function setRelayerAuthorization(address relayer, bool authorized) external onlyOwner {
-        authorizedRelayers[relayer] = authorized;
-        emit RelayerAuthorized(relayer, authorized);
-    }
     
     function setNitroliteSigner(address signer, bool trusted) external onlyOwner {
         trustedNitroliteSigners[signer] = trusted;
@@ -398,43 +357,28 @@ contract SessionEscrow is Ownable, ReentrancyGuard {
     }
     
     function setProtocolTreasury(address treasury) external onlyOwner {
-        if (treasury == address(0)) revert InvalidAddress();
+        if (treasury == address(0)) revert ZeroAddress();
         protocolTreasury = treasury;
     }
-
+    
     // ═══════════════════════════════════════════════════════════════════════════
     // VIEW FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════════
     
-    function getEscrow(bytes32 sessionId) external view returns (
-        EscrowState state,
-        uint256 amount,
-        address user,
-        uint256 fundedAt,
-        uint256 timeUntilTimeout
+    function getAccountInfo(address user) external view returns (
+        uint256 deposited,
+        uint256 available,
+        uint256 locked,
+        bytes32 activeSessionId,
+        SessionState state
     ) {
-        Escrow storage e = escrows[sessionId];
-        uint256 timeout = 0;
-        
-        if (e.state == EscrowState.Funded || e.state == EscrowState.Active) {
-            uint256 deadline = e.fundedAt + SESSION_TIMEOUT;
-            timeout = block.timestamp < deadline ? deadline - block.timestamp : 0;
-        }
-        
-        return (e.state, e.amount, e.user, e.fundedAt, timeout);
-    }
-    
-    function getUserActiveEscrow(address user) external view returns (
-        bytes32 sessionId,
-        EscrowState state,
-        uint256 amount
-    ) {
-        bytes32 sid = userActiveSession[user];
-        if (sid == bytes32(0)) {
-            return (bytes32(0), EscrowState.Empty, 0);
-        }
-        
-        Escrow storage e = escrows[sid];
-        return (sid, e.state, e.amount);
+        UserAccount storage acc = accounts[user];
+        return (
+            acc.depositedAmount,
+            acc.depositedAmount - acc.lockedAmount,
+            acc.lockedAmount,
+            acc.activeSessionId,
+            acc.sessionState
+        );
     }
 }

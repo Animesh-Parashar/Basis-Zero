@@ -5,7 +5,6 @@ import dynamic from 'next/dynamic'
 const DepositWidget = dynamic(() => import('@/components/vault/deposit-widget').then(mod => mod.DepositWidget), { ssr: false })
 const PortfolioView = dynamic(() => import('@/components/vault/portfolio-view').then(mod => mod.PortfolioView), { ssr: false })
 const WithdrawalWidget = dynamic(() => import('@/components/vault/withdrawal-widget').then(mod => mod.WithdrawalWidget), { ssr: false })
-const YieldInjectionWidget = dynamic(() => import('@/components/vault/yield-injection-widget').then(mod => mod.YieldInjectionWidget), { ssr: false })
 
 export function VaultClient() {
     return (
@@ -20,8 +19,8 @@ export function VaultClient() {
                         Vault
                     </h1>
                     <p className="max-w-2xl text-base text-muted-foreground">
-                        Deposit USDC from any chain and earn yield from BlackRock BUIDL tokenized T-Bills.
-                        Your principal is always protected.
+                        Deposit USDC on Polygon Amoy and manage your trading sessions.
+                        Your principal is protected.
                     </p>
                 </div>
 
@@ -36,7 +35,6 @@ export function VaultClient() {
                     {/* Right Column - Portfolio View */}
                     <div className="lg:col-span-7 space-y-6">
                         <PortfolioView />
-                        <YieldInjectionWidget />
                     </div>
                 </div>
             </div>

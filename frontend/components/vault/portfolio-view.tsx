@@ -1,44 +1,32 @@
 "use client"
 
-import { TrendingUp, Shield, DollarSign, Calendar, Lock, Loader2 } from "lucide-react"
-import { cn } from "@/lib/utils"
-import { useArcVault, SessionState } from "@/hooks/use-arc-vault"
+import { TrendingUp, Shield, DollarSign, Lock, Loader2 } from "lucide-react"
+import { useSessionEscrow, SessionState } from "@/hooks/use-session-escrow"
 
 export function PortfolioView() {
     const { 
-        principal, 
-        totalBalance, 
-        accruedYield,
-        availableYield,
-        apyPercent,
-        apyBps,
-        depositTimestamp,
+        deposited,
+        available,
+        locked,
         sessionState,
-        lockedAmount,
-        isLoading,
-        isConnected
-    } = useArcVault()
+        available: availableYield, // Maps to available for now
+    } = useSessionEscrow()
 
-    const principalNum = parseFloat(principal)
-    const yieldNum = parseFloat(accruedYield)
-    const totalNum = parseFloat(totalBalance)
-    const lockedNum = parseFloat(lockedAmount)
-    const apy = parseFloat(apyPercent) || 5.12
-
-    const yieldPercentage = principalNum > 0 ? (yieldNum / principalNum) * 100 : 0
+    // Simplified checks
+    const isConnected = !!deposited 
     
-    // Format deposit date
-    const depositDate = depositTimestamp > 0 
-        ? new Date(depositTimestamp * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-        : "No deposits yet"
+    const depositedNum = parseFloat(deposited) || 0
+    const availableNum = parseFloat(available) || 0
+    const lockedNum = parseFloat(locked) || 0
+    
+    // Hardcoded for demo/hackathon as "BlackRock BUIDL" rate
+    const apy = 5.2
 
-    // Session state label
+    // Session label
     const getSessionLabel = () => {
         switch (sessionState) {
-            case SessionState.PendingBridge: return "Pending Bridge"
             case SessionState.Active: return "Session Active"
             case SessionState.Settled: return "Settled"
-            case SessionState.Cancelled: return "Cancelled"
             default: return null
         }
     }
@@ -75,19 +63,13 @@ export function PortfolioView() {
                 {/* Total Value */}
                 <div className="text-center">
                     <p className="font-mono text-xs text-muted-foreground uppercase tracking-wider mb-2">
-                        Total Portfolio Value
+                        Total Balance
                     </p>
                     <p className="font-mono text-4xl font-bold">
-                        {isLoading ? (
-                            <span className="flex items-center justify-center gap-2">
-                                <Loader2 className="h-6 w-6 animate-spin" />
-                            </span>
-                        ) : (
-                            `$${totalNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        )}
+                        {`$${depositedNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                     </p>
                     <p className="mt-1 text-sm text-green-500">
-                        +${yieldNum.toFixed(2)} ({yieldPercentage.toFixed(2)}%)
+                        Earning {apy}% APY
                     </p>
                 </div>
 
@@ -97,70 +79,39 @@ export function PortfolioView() {
                         <div className="flex items-center gap-2 mb-2">
                             <DollarSign className="h-4 w-4 text-blue-500" />
                             <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
-                                Principal
+                                Available
                             </span>
                         </div>
-                        <p className="font-mono text-xl font-bold">${principalNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                        <p className="text-xs text-muted-foreground mt-1">Protected</p>
+                        <p className="font-mono text-xl font-bold">${availableNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                     </div>
 
-                    <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
+                    <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4">
                         <div className="flex items-center gap-2 mb-2">
-                            <TrendingUp className="h-4 w-4 text-green-500" />
+                            <Lock className="h-4 w-4 text-yellow-500" />
                             <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">
-                                Accrued Yield
+                                Locked in Session
                             </span>
                         </div>
-                        <p className="font-mono text-xl font-bold text-green-500">${yieldNum.toFixed(2)}</p>
-                        <p className="text-xs text-muted-foreground mt-1">Available</p>
+                        <p className="font-mono text-xl font-bold text-yellow-500">${lockedNum.toFixed(2)}</p>
                     </div>
                 </div>
 
                 {/* Session State (if active) */}
                 {sessionLabel && (
-                    <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4">
+                    <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                <Lock className="h-4 w-4 text-yellow-500" />
-                                <span className="font-mono text-xs text-yellow-500 uppercase tracking-wider">
+                                <TrendingUp className="h-4 w-4 text-green-500" />
+                                <span className="font-mono text-xs text-green-500 uppercase tracking-wider">
                                     {sessionLabel}
                                 </span>
                             </div>
-                            <span className="font-mono text-sm text-yellow-500">
-                                ${lockedNum.toFixed(2)} locked
+                            <span className="font-mono text-sm text-green-500">
+                                Trading Active
                             </span>
                         </div>
                     </div>
                 )}
-
-                {/* APY Display */}
-                <div className="rounded-lg border border-primary/30 bg-primary/10 p-4">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <p className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-                                Current APY
-                            </p>
-                            <p className="font-mono text-2xl font-bold text-primary">{apy}%</p>
-                            <p className="font-mono text-[10px] text-muted-foreground mt-1">
-                                {apyBps} bps from contract
-                            </p>
-                        </div>
-                        <div className="text-right">
-                            <p className="font-mono text-xs text-muted-foreground uppercase tracking-wider">
-                                Daily Earnings
-                            </p>
-                            <p className="font-mono text-lg font-medium text-foreground">
-                                ${((principalNum * (apy / 100)) / 365).toFixed(4)}
-                            </p>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Deposit Date */}
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Calendar className="h-3.5 w-3.5" />
-                    <span>First deposit: {depositDate}</span>
-                </div>
             </div>
         </div>
     )

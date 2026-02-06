@@ -4,35 +4,23 @@
  * Integrates with Yellow's Nitrolite SDK for off-chain state channel betting sessions.
  * 
  * Flow:
- * 1. User creates channel at apps.yellow.com
- * 2. Backend connects to ClearNode via WebSocket
- * 3. User opens application session for betting
- * 4. Bets are processed off-chain with signed state updates
- * 5. Session closes with final allocations
+ * 1. User locks collateral on SessionEscrow contract with sessionId
+ * 2. Backend receives notification and tracks the session
+ * 3. Bets are processed off-chain via AMM
+ * 4. Session closes with final PnL, backend signs settlement
+ * 5. Frontend can call contract.settleSession with signatures
  * 
  * @see https://erc7824.org/quick_start
  */
 
 import { Router } from 'express';
-import WebSocket from 'ws';
 import {
-  createAuthRequestMessage,
-  createAuthVerifyMessage,
-  createEIP712AuthMessageSigner,
-  createAppSessionMessage,
-  createCloseAppSessionMessage,
   createECDSAMessageSigner,
-  parseAnyRPCResponse,
-  parseAuthChallengeResponse,
-  parseCreateAppSessionResponse,
-  parseCloseAppSessionResponse,
-  RPCMethod,
-  RPCProtocolVersion,
   type MessageSigner,
 } from '@erc7824/nitrolite';
 import { privateKeyToAccount } from 'viem/accounts';
-import { createWalletClient, http, type Address, type Hex } from 'viem';
-import { arbitrumSepolia } from 'viem/chains';
+import { createWalletClient, http, type Address, type Hex, keccak256, encodePacked, toHex } from 'viem';
+import { polygonAmoy } from 'viem/chains';
 import { poolManager, Outcome } from '../amm';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -40,11 +28,10 @@ import { poolManager, Outcome } from '../amm';
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface SessionConfig {
-  sessionId: string;
-  appSessionId: string;
+  sessionId: Hex;          // Contract session ID (bytes32)
   user: Address;
   collateral: bigint;
-  rwaRateBps: number;
+  rwaRateBps: number;      // Yield rate in basis points (520 = 5.2%)
   safeModeEnabled: boolean;
   createdAt: number;
   status: 'pending' | 'active' | 'closing' | 'closed';
@@ -52,135 +39,14 @@ export interface SessionConfig {
 
 export interface Bet {
   id: string;
+  sessionId: Hex;
   marketId: string;
   side: 'YES' | 'NO';
-  amount: bigint; // USDC Cost
-  shares: bigint; // Shares received
+  amount: bigint;     // USDC Cost
+  shares: bigint;     // Shares received
   timestamp: number;
   resolved: boolean;
   won?: boolean;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CLEARNODE CONNECTION
-// ═══════════════════════════════════════════════════════════════════════════
-
-class ClearNodeConnection {
-  private url: string;
-  private ws: WebSocket | null = null;
-  private isConnected = false;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectInterval = 3000;
-  private jwtToken: string | null = null;
-  private onMessageCallback: ((data: string) => void) | null = null;
-
-  constructor(url: string) {
-    this.url = url;
-  }
-
-  setMessageHandler(handler: (data: string) => void) {
-    this.onMessageCallback = handler;
-  }
-
-  async connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url);
-
-      this.ws.onopen = () => {
-        console.log(`🟡 Connected to ClearNode at ${this.url}`);
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        resolve();
-      };
-
-      this.ws.onmessage = (event) => {
-        if (this.onMessageCallback) {
-          this.onMessageCallback(event.data.toString());
-        }
-      };
-
-      this.ws.onerror = (error) => {
-        console.error('ClearNode WebSocket error:', error);
-        reject(error);
-      };
-
-      this.ws.onclose = (event) => {
-        this.isConnected = false;
-        console.log(`ClearNode WebSocket closed: ${event.code} ${event.reason}`);
-        this.attemptReconnect();
-      };
-    });
-  }
-
-  private attemptReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Maximum ClearNode reconnection attempts reached');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = this.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1);
-    console.log(`Reconnecting to ClearNode in ${delay}ms`);
-
-    setTimeout(() => {
-      this.connect().catch(console.error);
-    }, delay);
-  }
-
-  send(message: string): void {
-    if (!this.isConnected || !this.ws) {
-      throw new Error('ClearNode not connected');
-    }
-    this.ws.send(message);
-  }
-
-  async sendAndWait<T>(message: string, parseResponse: (raw: string) => T, timeoutMs = 10000): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.onMessageCallback = originalHandler;
-        reject(new Error('ClearNode request timeout'));
-      }, timeoutMs);
-
-      const originalHandler = this.onMessageCallback;
-
-      this.onMessageCallback = (data: string) => {
-        try {
-          const response = parseResponse(data);
-          clearTimeout(timeout);
-          this.onMessageCallback = originalHandler;
-          resolve(response);
-        } catch {
-          // Not the response we're looking for, try original handler
-          if (originalHandler) {
-            originalHandler(data);
-          }
-        }
-      };
-
-      this.send(message);
-    });
-  }
-
-  setJwtToken(token: string) {
-    this.jwtToken = token;
-  }
-
-  getJwtToken(): string | null {
-    return this.jwtToken;
-  }
-
-  disconnect() {
-    if (this.ws) {
-      this.ws.close(1000, 'User initiated disconnect');
-      this.ws = null;
-    }
-    this.isConnected = false;
-  }
-
-  get connected(): boolean {
-    return this.isConnected;
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,40 +55,48 @@ class ClearNodeConnection {
 
 export class YellowSessionService {
   public router: Router;
-  private clearNode: ClearNodeConnection;
-  private sessions = new Map<string, SessionConfig>();
-  private sessionBets = new Map<string, Bet[]>();
-  private walletClient: ReturnType<typeof createWalletClient> | null = null;
+  private sessions = new Map<Hex, SessionConfig>();      // sessionId -> session
+  private sessionBets = new Map<Hex, Bet[]>();           // sessionId -> bets
+  private userSessions = new Map<Address, Hex>();        // user address -> active sessionId
   private signer: MessageSigner | null = null;
-  private serverAddress: Address | null = null;
+  private signerAddress: Address | null = null;
+  private privateKey: Hex | null = null;
 
   constructor() {
     this.router = Router();
-    this.clearNode = new ClearNodeConnection(
-      process.env.YELLOW_CLEARNODE_URL || 'wss://clearnet.yellow.com/ws'
-    );
     this.setupRoutes();
+    
+    // Auto-initialize if env var set
+    if (process.env.BACKEND_PRIVATE_KEY) {
+      this.initialize(process.env.BACKEND_PRIVATE_KEY as Hex);
+    }
   }
 
   private setupRoutes() {
-    // Initialize connection with wallet
+    // Initialize with private key (for signing settlements)
     this.router.post('/init', async (req, res) => {
       try {
         const { privateKey } = req.body;
         await this.initialize(privateKey);
-        res.json({ success: true, address: this.serverAddress });
+        res.json({ success: true, address: this.signerAddress });
       } catch (error) {
         res.status(500).json({ error: String(error) });
       }
     });
 
-    // Open a new betting session
+    // Open a new betting session (called after contract openSession)
     this.router.post('/open', async (req, res) => {
       try {
-        const { userAddress, collateral, safeModeEnabled, rwaRateBps } = req.body;
+        const { userAddress, sessionId, collateral, safeModeEnabled, rwaRateBps } = req.body;
+        
+        if (!sessionId || !userAddress) {
+          return res.status(400).json({ error: 'sessionId and userAddress required' });
+        }
+        
         const session = await this.openSession(
           userAddress as Address,
-          BigInt(collateral),
+          sessionId as Hex,
+          BigInt(collateral || '0'),
           safeModeEnabled ?? true,
           rwaRateBps ?? 520
         );
@@ -237,7 +111,7 @@ export class YellowSessionService {
       try {
         const { sessionId, marketId, side, amount } = req.body;
         const result = await this.placeBet(
-          sessionId,
+          sessionId as Hex,
           marketId,
           side,
           BigInt(amount)
@@ -252,33 +126,21 @@ export class YellowSessionService {
       }
     });
 
-    // Close session with final allocations
+    // Close session and get settlement signature
     this.router.post('/close', async (req, res) => {
       try {
         const { sessionId } = req.body;
-        const result = await this.closeSession(sessionId);
-        res.json({ success: result.success, pnl: result.pnl.toString() });
-      } catch (error) {
-        res.status(500).json({ error: String(error) });
-      }
-    });
-
-    // Sell a position (Early Exit)
-    this.router.post('/sell', async (req, res) => {
-      try {
-        const { sessionId, marketId, amount, outcome } = req.body;
-        // amount here refers to SHARES amount to sell
-        const result = await this.sellPosition(
-          sessionId,
-          marketId,
-          BigInt(amount),
-          outcome === 'YES' ? Outcome.YES : Outcome.NO
-        );
-        res.json({
-          success: true,
-          usdcReceived: result.usdcReceived.toString(),
-          priceImpact: result.priceImpact,
-          availableBalance: result.availableBalance.toString()
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'sessionId required' });
+        }
+        
+        const result = await this.closeSession(sessionId as Hex);
+        res.json({ 
+          success: result.success, 
+          pnl: result.pnl.toString(),
+          signature: result.signature,
+          sessionId: result.sessionId
         });
       } catch (error) {
         res.status(500).json({ error: String(error) });
@@ -287,24 +149,46 @@ export class YellowSessionService {
 
     // Get session status
     this.router.get('/:sessionId', (req, res) => {
-      const session = this.sessions.get(req.params.sessionId);
+      const sessionId = req.params.sessionId as Hex;
+      const session = this.sessions.get(sessionId);
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
-      const bets = this.sessionBets.get(req.params.sessionId) || [];
+      const bets = this.sessionBets.get(sessionId) || [];
       res.json({
         session: this.serializeSession(session),
         bets: bets.map(b => this.serializeBet(b)),
       });
     });
 
-    // Get streaming balance
+    // Get session by user address
+    this.router.get('/user/:address', (req, res) => {
+      const userAddress = req.params.address.toLowerCase() as Address;
+      const sessionId = this.userSessions.get(userAddress);
+      
+      if (!sessionId) {
+        return res.json({ session: null });
+      }
+      
+      const session = this.sessions.get(sessionId);
+      const bets = this.sessionBets.get(sessionId) || [];
+      
+      res.json({
+        session: session ? this.serializeSession(session) : null,
+        bets: bets.map(b => this.serializeBet(b)),
+      });
+    });
+
+    // Get streaming balance (yield calculation)
     this.router.get('/:sessionId/balance', (req, res) => {
+      const sessionId = req.params.sessionId as Hex;
       const { safeMode } = req.query;
+      
       const balance = this.getStreamingBalance(
-        req.params.sessionId,
+        sessionId,
         safeMode === 'true'
       );
+      
       res.json({
         principal: balance.principal.toString(),
         yield: balance.yield.toString(),
@@ -327,149 +211,42 @@ export class YellowSessionService {
     return {
       ...bet,
       amount: bet.amount.toString(),
+      shares: bet.shares.toString(),
     };
   }
 
   /**
-   * Initialize the service with server wallet
+   * Initialize the service with server wallet for signing
    */
   async initialize(privateKey: Hex): Promise<void> {
     const account = privateKeyToAccount(privateKey);
-    this.serverAddress = account.address;
-
-    this.walletClient = createWalletClient({
-      account,
-      chain: arbitrumSepolia,
-      transport: http(),
-    });
-
-    // Create ECDSA message signer for Nitrolite
+    this.signerAddress = account.address;
+    this.privateKey = privateKey;
     this.signer = createECDSAMessageSigner(privateKey);
 
-    // Connect to ClearNode
-    await this.clearNode.connect();
-
-    // Authenticate with ClearNode
-    await this.authenticate();
-
-    console.log(`🟡 Yellow Session Service initialized with address: ${this.serverAddress}`);
+    console.log(`🟡 Yellow Session Service initialized with signer: ${this.signerAddress}`);
   }
 
   /**
-   * Authenticate with ClearNode using EIP-712
-   */
-  private async authenticate(): Promise<void> {
-    if (!this.walletClient || !this.serverAddress) {
-      throw new Error('Wallet not initialized');
-    }
-
-    const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour
-
-    // Create auth request
-    const authRequest = await createAuthRequestMessage({
-      address: this.serverAddress,
-      session_key: this.serverAddress,
-      application: 'basis-zero',
-      expires_at: BigInt(expiresAt),
-      scope: 'console',
-      allowances: [],
-    });
-
-    // Set up message handler for auth flow
-    this.clearNode.setMessageHandler(async (data: string) => {
-      try {
-        const response = parseAnyRPCResponse(data);
-
-        if (response.method === RPCMethod.AuthChallenge) {
-          const challenge = parseAuthChallengeResponse(data);
-
-          // Create EIP-712 signer for auth
-          const eip712Signer = createEIP712AuthMessageSigner(
-            this.walletClient!,
-            {
-              scope: 'console',
-              session_key: this.serverAddress!,
-              expires_at: BigInt(expiresAt),
-              allowances: [],
-            },
-            { name: 'Basis-Zero' }
-          );
-
-          // Create and send auth verify
-          const authVerify = await createAuthVerifyMessage(eip712Signer, challenge);
-          this.clearNode.send(authVerify);
-        }
-
-        if (response.method === RPCMethod.AuthVerify) {
-          const params = response.params as { success?: boolean; jwt_token?: string };
-          if (params.success && params.jwt_token) {
-            this.clearNode.setJwtToken(params.jwt_token);
-            console.log('🟡 ClearNode authentication successful');
-          } else {
-            console.error('ClearNode authentication failed');
-          }
-        }
-      } catch (error) {
-        console.error('Auth message handling error:', error);
-      }
-    });
-
-    // Send initial auth request
-    this.clearNode.send(authRequest);
-  }
-
-  /**
-   * Open a new betting session
+   * Open a new betting session (after user calls contract.openSession)
    */
   async openSession(
     userAddress: Address,
+    sessionId: Hex,
     collateral: bigint,
     safeModeEnabled: boolean,
     rwaRateBps: number
   ): Promise<SessionConfig> {
-    if (!this.signer || !this.serverAddress) {
-      throw new Error('Service not initialized');
-    }
-
-    const sessionId = `session_${Date.now()}_${userAddress.slice(2, 10)}`;
-
-    // Create app session message
-    const signedMessage = await createAppSessionMessage(this.signer, {
-      definition: {
-        application: 'basis-zero',
-        protocol: RPCProtocolVersion.NitroRPC_0_2,
-        participants: [userAddress, this.serverAddress],
-        weights: [100, 0],
-        quorum: 100,
-        challenge: 0,
-        nonce: Date.now(),
-      },
-      allocations: [
-        {
-          participant: userAddress,
-          asset: 'usdc',
-          amount: collateral.toString(),
-        },
-        {
-          participant: this.serverAddress,
-          asset: 'usdc',
-          amount: '0',
-        },
-      ],
-    });
-
-    // Send and wait for response
-    const response = await this.clearNode.sendAndWait(
-      signedMessage,
-      parseCreateAppSessionResponse
-    );
-
-    const appSessionId = response.params?.appSessionId || `app_${Date.now()}`;
+    const normalizedUser = userAddress.toLowerCase() as Address;
+    
+    console.log(`🟡 Opening Session for ${userAddress}`);
+    console.log(`   Session ID: ${sessionId}`);
+    console.log(`   Collateral: ${collateral}`);
+    console.log(`   Safe Mode: ${safeModeEnabled}`);
 
     const session: SessionConfig = {
       sessionId,
-      appSessionId: appSessionId as string,
-      user: userAddress,
+      user: normalizedUser,
       collateral,
       rwaRateBps,
       safeModeEnabled,
@@ -479,8 +256,9 @@ export class YellowSessionService {
 
     this.sessions.set(sessionId, session);
     this.sessionBets.set(sessionId, []);
+    this.userSessions.set(normalizedUser, sessionId);
 
-    console.log(`🟡 Session opened: ${sessionId} (app: ${appSessionId})`);
+    console.log(`🟡 Session opened: ${sessionId}`);
 
     return session;
   }
@@ -489,7 +267,7 @@ export class YellowSessionService {
    * Place a bet in an active session
    */
   async placeBet(
-    sessionId: string,
+    sessionId: Hex,
     marketId: string,
     side: 'YES' | 'NO',
     amount: bigint
@@ -512,17 +290,17 @@ export class YellowSessionService {
     const outcome = side === 'YES' ? Outcome.YES : Outcome.NO;
 
     // Execute bet against AMM Pool
-    // This updates the global price and the user's position in the AMM
     const result = poolManager.placeBet(
       marketId,
-      session.user, // Use user eth address as ID
+      session.user,
       amount,
       outcome
     );
 
-    // Create bet record (for history/frontend)
+    // Create bet record
     const bet: Bet = {
       id: `bet_${Date.now()}`,
+      sessionId,
       marketId,
       side,
       amount,
@@ -536,14 +314,10 @@ export class YellowSessionService {
     bets.push(bet);
     this.sessionBets.set(sessionId, bets);
 
-    // Note: In production, this would submit an app state update to ClearNode
-    // using createSubmitAppStateMessage to prove the new balance to the user.
-
-    // Recalculate available balance (Principal + Yield - Amount Spent)
+    // Recalculate available balance
     const newBalance = this.getStreamingBalance(sessionId, session.safeModeEnabled);
 
-    console.log(`🟡 AMM Bet Placed: ${marketId} | ${side} | ${Number(amount) / 1e6} USDC @ ${result.effectivePrice.toFixed(4)}`);
-    console.log(`   Shares Received: ${Number(result.totalShares) / 1e6}`);
+    console.log(`🟡 Bet Placed: ${marketId} | ${side} | ${Number(amount) / 1e6} USDC @ ${result.effectivePrice.toFixed(4)}`);
 
     return {
       success: true,
@@ -553,62 +327,9 @@ export class YellowSessionService {
   }
 
   /**
-   * Sell shares back to the AMM (Early Exit)
-   */
-  async sellPosition(
-    sessionId: string,
-    marketId: string,
-    sharesAmount: bigint,
-    outcome: Outcome
-  ): Promise<{ success: boolean; usdcReceived: bigint; priceImpact: number; availableBalance: bigint }> {
-    const session = this.sessions.get(sessionId);
-    if (!session) throw new Error('Session not found');
-    if (session.status !== 'active') throw new Error('Session not active');
-
-    // Execute Sell against AMM
-    const result = poolManager.sellPosition(
-      marketId,
-      session.user,
-      sharesAmount,
-      outcome
-    );
-
-    // Record the "Sell" as a negative bet or trade record
-    // For now, we append a special Trade Record to the log
-    const trade: Bet = {
-      id: `sell_${Date.now()}`,
-      marketId,
-      side: outcome === Outcome.YES ? 'YES' : 'NO',
-      amount: -result.usdcOut, // Negative amount implies we RECEIVED money
-      shares: -sharesAmount,   // Negative shares implies we SOLD shares
-      timestamp: Date.now(),
-      resolved: false,
-      won: undefined // Not relevant for sell
-    };
-
-    const bets = this.sessionBets.get(sessionId) || [];
-    bets.push(trade);
-    this.sessionBets.set(sessionId, bets);
-
-    // Note: In production, send signed state update (Balance Increased)
-
-    const newBalance = this.getStreamingBalance(sessionId, session.safeModeEnabled);
-
-    console.log(`🟡 AMM Sell Executed: ${marketId} | Sold ${Number(sharesAmount) / 1e6} Shares`);
-    console.log(`   Received: ${Number(result.usdcOut) / 1e6} USDC`);
-
-    return {
-      success: true,
-      usdcReceived: result.usdcOut,
-      priceImpact: result.priceImpact,
-      availableBalance: newBalance.available
-    };
-  }
-
-  /**
    * Resolve a bet with outcome
    */
-  resolveBet(sessionId: string, betId: string, won: boolean): void {
+  resolveBet(sessionId: Hex, betId: string, won: boolean): void {
     const bets = this.sessionBets.get(sessionId);
     if (!bets) return;
 
@@ -621,20 +342,20 @@ export class YellowSessionService {
   }
 
   /**
-   * Close a session and finalize allocations
+   * Close a session and generate settlement signature
    */
-  async closeSession(sessionId: string): Promise<{ success: boolean; pnl: bigint }> {
+  async closeSession(sessionId: Hex): Promise<{ success: boolean; pnl: bigint; signature: string; sessionId: Hex }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error('Session not found');
     }
-    if (!this.signer || !this.serverAddress) {
-      throw new Error('Service not initialized');
+    if (!this.privateKey) {
+      throw new Error('Service not initialized with private key');
     }
 
     session.status = 'closing';
 
-    // Calculate final PnL
+    // Calculate final PnL from resolved bets
     const bets = this.sessionBets.get(sessionId) || [];
     let pnl = BigInt(0);
 
@@ -642,51 +363,50 @@ export class YellowSessionService {
       if (bet.resolved) {
         if (bet.won) {
           // Win: Payout = Shares * 1 USDC - Cost
-          // Cost is bet.amount
-          // Payout is bet.shares (since 1 share = 1 USDC on win)
           pnl += (bet.shares - bet.amount);
         } else {
           // Loss: Payout = 0 - Cost
           pnl -= bet.amount;
         }
+      } else {
+        // Unresolved bets count as loss for now (user didn't sell before closing)
+        // In production, you might want to force-sell or handle differently
+        pnl -= bet.amount;
       }
     }
 
-    // Calculate final balances
-    const finalUserBalance = session.collateral + pnl;
-    const finalServerBalance = pnl > 0 ? BigInt(0) : -pnl;
-
-    // Create close session message
-    const signedMessage = await createCloseAppSessionMessage(this.signer, {
-      app_session_id: session.appSessionId as Hex,
-      allocations: [
-        {
-          participant: session.user,
-          asset: 'usdc',
-          amount: finalUserBalance.toString(),
-        },
-        {
-          participant: this.serverAddress,
-          asset: 'usdc',
-          amount: finalServerBalance.toString(),
-        },
-      ],
-    });
-
-    // Send and wait for response
-    await this.clearNode.sendAndWait(signedMessage, parseCloseAppSessionResponse);
+    // Generate signature for contract settlement
+    // Contract expects: keccak256(abi.encodePacked(sessionId, pnl))
+    const messageHash = keccak256(
+      encodePacked(['bytes32', 'int256'], [sessionId, pnl])
+    );
+    
+    // Sign with private key
+    const account = privateKeyToAccount(this.privateKey);
+    const signature = await account.signMessage({ message: { raw: messageHash } });
 
     session.status = 'closed';
-    console.log(`🟡 Session closed: ${sessionId} with PnL: ${pnl}`);
+    
+    // Clean up user mapping
+    this.userSessions.delete(session.user);
 
-    return { success: true, pnl };
+    console.log(`🟡 Session closed: ${sessionId}`);
+    console.log(`   PnL: ${Number(pnl) / 1e6} USDC`);
+    console.log(`   Signature generated for contract settlement`);
+
+    return { 
+      success: true, 
+      pnl,
+      signature,
+      sessionId
+    };
   }
 
   /**
    * Get streaming balance with yield calculation
    */
   getStreamingBalance(
-    sessionId: string,
+    sessionId: Hex,
     safeMode: boolean
   ): { principal: bigint; yield: bigint; openBets: bigint; available: bigint } {
     const session = this.sessions.get(sessionId);
@@ -711,7 +431,7 @@ export class YellowSessionService {
 
     let available: bigint;
     if (safeMode) {
-      // Safe Mode: only yield available for betting
+      // Safe Mode: only yield available for betting (Yield-Only mode)
       available = yieldAmount > openBets ? yieldAmount - openBets : BigInt(0);
     } else {
       // Full Mode: principal + yield - openBets

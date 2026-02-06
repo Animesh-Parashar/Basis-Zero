@@ -1,79 +1,99 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Zap, Clock, ArrowRight, Loader2, CheckCircle, AlertCircle } from "lucide-react"
+import { useState, useEffect, useRef } from "react"
+import { Zap, Clock, ArrowRight, Loader2, CheckCircle, AlertCircle, Shield, Sparkles } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { useArcVault, SessionState } from "@/hooks/use-arc-vault"
+import { useSessionEscrow, SessionState } from "@/hooks/use-session-escrow"
 import { useChainId, useSwitchChain } from "wagmi"
-import { arcTestnet } from "@/lib/wagmi"
+import { polygonAmoy } from "viem/chains"
+import { parseUnits, type Hex } from "viem"
 
-type SessionStep = "idle" | "locking" | "success" | "error"
+type SessionStep = "idle" | "locking" | "notifying" | "success" | "error"
 
 export function SessionStartWidget() {
     const {
-        totalBalance,
+        available,
         sessionState,
-        isConnected,
-        apyPercent,
         startSession,
-        isSessionStartSuccess,
-        startSessionError,
+        isSessionOpenSuccess,
+        isOpeningSession,
+        notifyBackendSessionStart,
+        sessionHash,
+        pendingSessionId,
         refetch
-    } = useArcVault()
+    } = useSessionEscrow()
 
     const chainId = useChainId()
     const { switchChain } = useSwitchChain()
 
     const [amount, setAmount] = useState("")
+    const [safeMode, setSafeMode] = useState(true) // Yield-only mode by default
     const [step, setStep] = useState<SessionStep>("idle")
     const [error, setError] = useState<string | null>(null)
     const [lockedAmount, setLockedAmount] = useState<string | null>(null)
+    
+    // Store sessionId from startSession call
+    const sessionIdRef = useRef<Hex | null>(null)
 
-    const availableNum = parseFloat(totalBalance) || 0
+    const availableNum = parseFloat(available) || 0
     const amountNum = parseFloat(amount) || 0
     const isValidAmount = amountNum > 0 && amountNum <= availableNum
-    const hasActiveSession = sessionState !== SessionState.None
+    const hasActiveSession = sessionState === SessionState.Active
+    
+    const isConnected = !!available
 
-    // Handle chain switch if needed
     const handleStartSession = async () => {
-        if (!isConnected || !amount || !isValidAmount) return
+        if (!amount || !isValidAmount) return
         setError(null)
 
-        if (chainId !== arcTestnet.id) {
-            switchChain({ chainId: arcTestnet.id })
+        if (chainId !== polygonAmoy.id) {
+            switchChain({ chainId: polygonAmoy.id })
             return
         }
 
         setStep("locking")
         setLockedAmount(amount)
-        await startSession(amount, true)
+        
+        const result = await startSession(amount, safeMode)
+        if (result) {
+            sessionIdRef.current = result.sessionId
+        }
     }
 
-    // After contract call succeeds
+    // After contract call succeeds, notify backend
     useEffect(() => {
-        if (isSessionStartSuccess && step === "locking") {
-            setStep("success")
-            refetch()
+        if (isSessionOpenSuccess && step === "locking" && sessionIdRef.current && lockedAmount) {
+            setStep("notifying")
+            
+            const notify = async () => {
+                try {
+                    await notifyBackendSessionStart(
+                        sessionIdRef.current!,
+                        lockedAmount,
+                        safeMode
+                    )
+                    setStep("success")
+                    refetch()
+                } catch (err) {
+                    console.error("Backend notification failed:", err)
+                    // Session is open on contract, but backend didn't register
+                    // User can still trade, just backend tracking might be off
+                    setStep("success")
+                    refetch()
+                }
+            }
+            notify()
         }
-    }, [isSessionStartSuccess, step])
+    }, [isSessionOpenSuccess, step, lockedAmount, safeMode, notifyBackendSessionStart, refetch])
 
-    // Handle contract errors
-    useEffect(() => {
-        if (startSessionError) {
-            setError(startSessionError.message || "Transaction failed")
-            setStep("error")
-        }
-    }, [startSessionError])
-
-    // Reset after success
     const handleReset = () => {
         setStep("idle")
         setAmount("")
         setLockedAmount(null)
         setError(null)
+        sessionIdRef.current = null
     }
 
-    // Not connected state
     if (!isConnected) {
         return (
             <div className="rounded-xl border border-border bg-card/60 glass overflow-hidden p-6 text-center">
@@ -83,7 +103,6 @@ export function SessionStartWidget() {
         )
     }
 
-    // Already has session
     if (hasActiveSession) {
         return (
             <div className="rounded-xl border border-green-500/20 bg-green-500/10 p-6">
@@ -94,7 +113,7 @@ export function SessionStartWidget() {
                     <div>
                         <h3 className="font-semibold text-green-400">Session Active</h3>
                         <p className="text-sm text-muted-foreground">
-                            {sessionState === SessionState.PendingBridge ? "Waiting for confirmation..." : "Ready to trade"}
+                            Ready to trade on Yellow Network
                         </p>
                     </div>
                 </div>
@@ -102,7 +121,6 @@ export function SessionStartWidget() {
         )
     }
 
-    // Success state
     if (step === "success") {
         return (
             <div className="rounded-xl border border-green-500/20 bg-green-500/10 p-6 text-center">
@@ -111,34 +129,20 @@ export function SessionStartWidget() {
                 <p className="text-muted-foreground mt-2">
                     Locked {lockedAmount} USDC for trading
                 </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                    {safeMode ? "Yield-Only Mode: Trade with accrued yield" : "Full Mode: Trade with full balance"}
+                </p>
                 <button 
                     onClick={handleReset}
                     className="w-full mt-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-colors"
                 >
-                    Continue
+                    Continue to Trade
                 </button>
             </div>
         )
     }
 
-    // Error state
-    if (step === "error") {
-        return (
-            <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-6 text-center">
-                <AlertCircle className="h-12 w-12 mx-auto mb-4 text-red-500" />
-                <h3 className="font-semibold text-lg text-red-400">Error</h3>
-                <p className="text-muted-foreground mt-2 text-sm">{error}</p>
-                <button 
-                    onClick={handleReset}
-                    className="w-full mt-4 py-3 bg-secondary hover:bg-secondary/80 rounded-lg font-medium transition-colors"
-                >
-                    Try Again
-                </button>
-            </div>
-        )
-    }
-
-    const isProcessing = step === "locking"
+    const isProcessing = step === "locking" || step === "notifying"
 
     return (
         <div className="rounded-xl border border-border bg-card/60 glass overflow-hidden">
@@ -165,7 +169,50 @@ export function SessionStartWidget() {
                         </span>
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
-                        Earning {apyPercent}% APY
+                        Earning ~5.2% APY
+                    </div>
+                </div>
+
+                {/* Trading Mode Toggle */}
+                <div className="p-4 rounded-lg border border-border bg-secondary/20">
+                    <p className="text-sm font-medium mb-3">Trading Mode</p>
+                    <div className="grid grid-cols-2 gap-2">
+                        <button
+                            onClick={() => setSafeMode(true)}
+                            disabled={isProcessing}
+                            className={cn(
+                                "p-3 rounded-lg border text-left transition-all",
+                                safeMode 
+                                    ? "border-primary bg-primary/10" 
+                                    : "border-border hover:border-primary/50"
+                            )}
+                        >
+                            <div className="flex items-center gap-2 mb-1">
+                                <Shield className="h-4 w-4 text-green-500" />
+                                <span className="font-medium text-sm">Yield Only</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Trade with accrued yield, protect principal
+                            </p>
+                        </button>
+                        <button
+                            onClick={() => setSafeMode(false)}
+                            disabled={isProcessing}
+                            className={cn(
+                                "p-3 rounded-lg border text-left transition-all",
+                                !safeMode 
+                                    ? "border-primary bg-primary/10" 
+                                    : "border-border hover:border-primary/50"
+                            )}
+                        >
+                            <div className="flex items-center gap-2 mb-1">
+                                <Sparkles className="h-4 w-4 text-yellow-500" />
+                                <span className="font-medium text-sm">Full Mode</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Trade with entire locked balance
+                            </p>
+                        </button>
                     </div>
                 </div>
 
@@ -187,7 +234,7 @@ export function SessionStartWidget() {
                         <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
                             <span className="font-mono text-sm text-primary font-bold">USDC</span>
                             <button 
-                                onClick={() => setAmount(totalBalance)}
+                                onClick={() => setAmount(available)}
                                 disabled={isProcessing}
                                 className="text-xs bg-primary/10 hover:bg-primary/20 text-primary px-2 py-1 rounded disabled:opacity-50"
                             >
@@ -202,7 +249,20 @@ export function SessionStartWidget() {
                     <div className="p-4 rounded-lg bg-primary/10 border border-primary/20">
                         <div className="flex items-center gap-3">
                             <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                            <div className="text-sm">Confirm transaction in wallet...</div>
+                            <div className="text-sm">
+                                {step === "locking" && "Confirm transaction in wallet..."}
+                                {step === "notifying" && "Connecting to Yellow Network..."}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Error */}
+                {error && (
+                    <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20">
+                        <div className="flex items-center gap-3 text-red-500">
+                            <AlertCircle className="h-5 w-5" />
+                            <span className="text-sm">{error}</span>
                         </div>
                     </div>
                 )}
@@ -234,7 +294,7 @@ export function SessionStartWidget() {
                 {/* Info */}
                 <div className="text-xs text-muted-foreground text-center flex items-center justify-center gap-1">
                     <Clock className="h-3 w-3" />
-                    Session timeout: 1 hour
+                    Session timeout: 24 hours
                 </div>
             </div>
         </div>

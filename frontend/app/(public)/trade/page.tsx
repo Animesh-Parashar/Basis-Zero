@@ -7,7 +7,8 @@ import { MarketGrid } from "@/components/trade/market-grid"
 import { OrderBook } from "@/components/trade/order-book"
 import { CreateMarketDialog, CreateMarketButton } from "@/components/trade/create-market-dialog"
 import { useMarkets } from "@/hooks/use-amm"
-import { useArcVault, SessionState } from "@/hooks/use-arc-vault"
+import { useSessionEscrow, SessionState } from "@/hooks/use-session-escrow"
+import { useQuery } from "@tanstack/react-query"
 import { useAccount } from "wagmi"
 import type { Market } from "@/lib/amm-types"
 
@@ -27,15 +28,37 @@ export default function TradePage() {
     // Fetch markets to get the selected market details
     const { data: marketsData } = useMarkets()
     
-    // Check session state from vault
-    const { sessionState, sessionId, lockedAmount, isConnected } = useArcVault()
-    const { address } = useAccount()
-    const hasActiveSession = sessionState === SessionState.Active || sessionState === SessionState.PendingBridge
+    // Check session state from session escrow
+    const { 
+        sessionState, 
+        activeSessionId, 
+        locked, 
+        fetchStreamingBalance 
+    } = useSessionEscrow()
+    
+    const { address, isConnected } = useAccount()
+    const hasActiveSession = sessionState === SessionState.Active
+
+    // Fetch streaming balance for max betting amount (yield-only mode)
+    const { data: streamingData } = useQuery({
+        queryKey: ['streaming-balance-for-trade', activeSessionId],
+        queryFn: () => fetchStreamingBalance(true), // safeMode = true for yield-only
+        enabled: !!activeSessionId && hasActiveSession,
+        refetchInterval: 5000,
+    })
 
     // Find the selected market from the markets list
     const selectedMarket: Market | null = selectedMarketId
         ? marketsData?.markets?.find(m => m.marketId === selectedMarketId) || null
         : null
+
+    // Calculate max betting amount
+    // In yield-only mode: only accrued yield available for betting
+    // For now we show yield available. In full mode, it would be the full locked amount.
+    const yieldAvailable = parseFloat(streamingData?.available || "0")
+    const maxBettingAmount = hasActiveSession 
+        ? (yieldAvailable > 0 ? yieldAvailable.toString() : locked)
+        : "0"
 
     return (
         <div className="min-h-screen pt-24 pb-12 overflow-x-hidden">
@@ -50,7 +73,9 @@ export default function TradePage() {
                             Prediction Markets
                         </h1>
                         <p className="max-w-2xl text-base text-muted-foreground">
-                            Trade using your vault balance. Your principal earns yield in RWA vaults.
+                            {hasActiveSession 
+                                ? "Trade using your accrued yield. Your principal stays protected."
+                                : "Start a session to trade. Your principal earns yield while locked."}
                         </p>
                     </div>
 
@@ -62,7 +87,7 @@ export default function TradePage() {
                 <div className="grid gap-6 lg:grid-cols-12">
                     {/* Left Column - Balance & Order Book */}
                     <div className="lg:col-span-4 space-y-6">
-                        {/* Streaming Balance Widget - Fetches real vault data */}
+                        {/* Streaming Balance Widget */}
                         <StreamingBalance />
 
                         {/* Session Start Widget - Shows when no active session */}
@@ -73,8 +98,8 @@ export default function TradePage() {
                         {/* Order Book / Trade Panel */}
                         <OrderBook
                             selectedMarket={selectedMarket}
-                            userId={sessionId || address || "guest"}
-                            maxAmount={hasActiveSession ? lockedAmount : undefined}
+                            userId={activeSessionId || address || "guest"}
+                            maxAmount={maxBettingAmount}
                         />
                     </div>
 
