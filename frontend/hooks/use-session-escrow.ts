@@ -213,7 +213,12 @@ export function useSessionEscrow() {
             })
 
             if (!response.ok) {
-                const error = await response.json()
+                let error: any = {}
+                try {
+                    error = await response.json()
+                } catch {
+                    error = { error: `HTTP ${response.status}: ${response.statusText}` }
+                }
                 console.error("Backend session open failed:", error)
                 return null
             }

@@ -1,39 +1,58 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Gavel, Clock, CheckCircle, XCircle, Loader2, AlertCircle, Check, X, TrendingUp } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { useMarkets } from "@/hooks/use-amm"
 import { useAccount } from "wagmi"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import type { Market } from "@/lib/amm-types"
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDate(date: Date): string {
+    return `${MONTHS[date.getUTCMonth()]} ${date.getUTCDate()}, ${date.getUTCFullYear()}`
+}
+
+// Fetch markets by resolver address from backend
+async function fetchMyMarkets(address: string): Promise<{ markets: Market[] }> {
+    const response = await fetch(`/api/amm/markets/resolver/${address}`)
+    if (!response.ok) return { markets: [] }
+    return response.json()
+}
 
 export function MyMarkets() {
     const { address } = useAccount()
-    const { data: marketsData, isLoading } = useMarkets()
     const [resolvingMarket, setResolvingMarket] = useState<Market | null>(null)
+    const [mounted, setMounted] = useState(false)
+    useEffect(() => setMounted(true), [])
 
-    // Filter markets where user is the resolver
-    const myMarkets = (marketsData?.markets || []).filter(
-        (m) => m.resolverAddress && address &&
-            m.resolverAddress.toLowerCase() === address.toLowerCase()
-    )
+    // Fetch markets created by this wallet (any status)
+    const { data: marketsData, isLoading } = useQuery({
+        queryKey: ['my-markets', address],
+        queryFn: () => fetchMyMarkets(address!),
+        enabled: mounted && !!address,
+        staleTime: 10 * 1000,
+        refetchInterval: 30 * 1000,
+    })
 
+    const myMarkets = marketsData?.markets || []
     const activeMarkets = myMarkets.filter(m => m.status === 'ACTIVE')
     const resolvedMarkets = myMarkets.filter(m => m.status === 'RESOLVED')
 
-    if (!address) {
+    if (!mounted || !address) {
         return (
             <div className="rounded-xl border border-border bg-card/60 glass overflow-hidden">
                 <div className="border-b border-border/50 bg-secondary/40 px-4 py-3">
-                    <h3 className="font-mono text-xs uppercase tracking-wider text-primary">
-                        My Markets
-                    </h3>
+                    <div className="flex items-center justify-between">
+                        <h3 className="font-mono text-xs uppercase tracking-wider text-primary">
+                            My Markets
+                        </h3>
+                    </div>
                 </div>
                 <div className="p-8 text-center">
                     <Gavel className="h-10 w-10 mx-auto mb-3 text-muted-foreground/50" />
                     <p className="text-sm text-muted-foreground">
-                        Connect wallet to view your markets
+                        {mounted ? 'Connect wallet to view your markets' : 'Loading...'}
                     </p>
                 </div>
             </div>
@@ -128,7 +147,7 @@ function MarketCard({
                     <div className="flex items-center gap-3 mt-1.5">
                         <span className="flex items-center gap-1 text-xs text-muted-foreground">
                             <Clock className="h-3 w-3" />
-                            {expiryDate.toLocaleDateString()}
+                            {formatDate(expiryDate)}
                         </span>
                         {market.category && (
                             <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
@@ -218,6 +237,11 @@ function ResolveDialog({
         },
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['amm', 'markets'] })
+            queryClient.invalidateQueries({ queryKey: ['my-markets'] })
+            // Invalidate trades so PnL updates in Recent Activity
+            queryClient.invalidateQueries({ queryKey: ['user-trades'] })
+            // Invalidate streaming balance since resolved positions are no longer locked
+            queryClient.invalidateQueries({ queryKey: ['streaming-balance-for-trade'] })
             onClose()
         },
     })

@@ -41,6 +41,8 @@ export function ResolveMarketDialog({ isOpen, onClose, market }: ResolveMarketDi
         },
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['amm', 'markets'] })
+            queryClient.invalidateQueries({ queryKey: ['user-trades'] })
+            queryClient.invalidateQueries({ queryKey: ['streaming-balance-for-trade'] })
             onClose()
         }
     })
