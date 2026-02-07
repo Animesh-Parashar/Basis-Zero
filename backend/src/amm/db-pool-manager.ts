@@ -661,11 +661,6 @@ export async function claimWinningsDB(
     }
     if (losingPosition && loseShares > 0n) {
         await db.upsertPosition(userId, marketId, losingOutcome, 0n, losingPosition.average_entry_price);
-    // 5. Update User Balance (Session)
-    // userId is actually the session_id when trading through sessions
-    const session = await db.getSession(userId);
-    if (!session) {
-        throw new Error('No active session found to credit winnings');
     }
 
     // 6. Update User Balance (Session)
