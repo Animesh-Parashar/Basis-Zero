@@ -271,6 +271,7 @@ export async function placeBetDB(
         const newBalance = BigInt(session.current_balance) - usdcAmount;
         const newNonce = session.nonce + 1;
         await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
+        console.log(`[PoolManager-DB] Session balance updated: ${session.current_balance} -> ${newBalance} (deducted ${usdcAmount})`);
     }
 
     // Calculate new prices
@@ -281,20 +282,6 @@ export async function placeBetDB(
     const noPrice = 1 - yesPrice;
 
     console.log(`[PoolManager-DB] Bet placed: ${userId} bet ${usdcAmount} on ${outcome} in ${marketId}`);
-
-    // Deduct USDC cost from session balance
-    try {
-        const session = await db.getSession(userId);
-        if (session) {
-            const currentBalance = BigInt(session.current_balance);
-            const newBalance = currentBalance - usdcAmount;
-            const newNonce = session.nonce + 1;
-            await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
-            console.log(`[PoolManager-DB] Session balance updated: ${currentBalance} -> ${newBalance} (deducted ${usdcAmount})`);
-        }
-    } catch (balErr) {
-        console.warn(`[PoolManager-DB] Failed to update session balance on buy: ${balErr}`);
-    }
 
     // Record trade for PnL tracking
     try {
@@ -411,6 +398,7 @@ export async function sellPositionDB(
         const newBalance = BigInt(session.current_balance) + result.usdcOut;
         const newNonce = session.nonce + 1;
         await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
+        console.log(`[PoolManager-DB] Session balance updated: ${session.current_balance} -> ${newBalance} (added ${result.usdcOut})`);
     }
 
     // Calculate new prices
@@ -421,20 +409,6 @@ export async function sellPositionDB(
     const noPrice = 1 - yesPrice;
 
     console.log(`[PoolManager-DB] Sold: ${userId} sold ${sharesAmount} ${outcome} shares in ${marketId}`);
-
-    // Add USDC proceeds to session balance
-    try {
-        const session = await db.getSession(userId);
-        if (session) {
-            const currentBalance = BigInt(session.current_balance);
-            const newBalance = currentBalance + result.usdcOut;
-            const newNonce = session.nonce + 1;
-            await db.updateSessionBalance(session.session_id, newBalance, session.latest_signature, newNonce);
-            console.log(`[PoolManager-DB] Session balance updated: ${currentBalance} -> ${newBalance} (added ${result.usdcOut})`);
-        }
-    } catch (balErr) {
-        console.warn(`[PoolManager-DB] Failed to update session balance on sell: ${balErr}`);
-    }
 
     // Record trade for PnL tracking
     // Realized PnL = USDC received - (shares sold * average entry price)
